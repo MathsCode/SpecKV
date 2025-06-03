@@ -131,7 +131,7 @@ def get_model_answers(
     question = questions[0]
 
     # warmup
-    for _ in range(3):
+    for _ in range(0):
         torch.manual_seed(0)
 
         messages = [

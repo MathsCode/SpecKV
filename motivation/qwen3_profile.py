@@ -15,7 +15,10 @@ def main(args):
         device_map="auto"
     )
     dataset_path = '/home/xujiaming/xujiaming/Paper/dataset/'+args.dataset+'/question.jsonl'
-    save_path = './result/'+args.dataset+'/'+args.model+'-result.jsonl'
+    if args.thinking:
+        save_path = './result_thinking/'+args.dataset+'/'+args.model+'-result.jsonl'
+    else:
+        save_path = './result_non_thinking/'+args.dataset+'/'+args.model+'-result.jsonl'
     questions = load_questions(dataset_path,args.begin,args.end)
     
     # two special tokens are used to indicate the beginning and end of thinking content
@@ -35,7 +38,7 @@ def main(args):
             messages,
             tokenize=False,
             add_generation_prompt=True,
-            enable_thinking=True # Switches between thinking and non-thinking modes. Default is True.
+            enable_thinking=args.thinking # Switches between thinking and non-thinking modes. Default is True.
         )
         model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
 
@@ -75,5 +78,6 @@ if __name__ == "__main__":
     parser.add_argument("--model", "-m", type=str, default="Qwen3-8B")
     parser.add_argument("--begin", "-b", type=int,default=0)
     parser.add_argument("--end", "-e", type=int,default=1)
+    parser.add_argument("--thinking", "-t", action="store_true", default=False)
     args = parser.parse_args()
     main(args)

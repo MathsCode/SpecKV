@@ -1,0 +1,16 @@
+{
+    // 使用 IntelliSense 了解相关属性。 
+    // 悬停以查看现有属性的描述。
+    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        
+        {
+            "name": "Python 调试程序: 模块",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "eagle.evaluation.test",
+            "args": ["--ea-model-path","/home/xujiaming/xujiaming/models/EAGLE3-LLaMA3.1-Instruct-8B","--base-model-path", "/share/public/public_models/Llama-3.1-8B-Instruct", "--use_eagle3"]
+        }
+    ]
+}

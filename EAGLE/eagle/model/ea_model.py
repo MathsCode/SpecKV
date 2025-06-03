@@ -248,6 +248,7 @@ class EaModel(nn.Module):
             self.base_model.model.tree_mask = tree_mask
 
             draft_tokens = draft_tokens.to(input_ids.device)
+            # print('draft',draft_tokens)
             # Target model forward, get logits
             logits, hidden_state_new, outputs = tree_decoding(
                 self,
@@ -265,6 +266,7 @@ class EaModel(nn.Module):
             best_candidate, accept_length, sample_p = evaluate_posterior(
                 logits, candidates, logits_processor
             )
+            # accept_length = 0
             # print(accept_length)
             # Adjusting the input sequence, draft model forward
             input_ids, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, new_token, hidden_state, sample_token = update_inference_inputs(
