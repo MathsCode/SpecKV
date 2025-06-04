@@ -63,6 +63,7 @@ class Mer_Model(nn.Module):
             top_p=0.0,
             top_k=0.0,
             max_length=2048,
+            output_attentions = False,
     ):
         stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
 
@@ -99,6 +100,7 @@ class Mer_Model(nn.Module):
         
         input_len = input_ids.shape[1]
         
+        
         # [xjm:] ---------------Start Mer_Model Prefill--------------
         with torch.inference_mode():
             # [xjm:] ---------------Start Ori_model Prefill--------------
@@ -132,21 +134,32 @@ class Mer_Model(nn.Module):
             # [xjm:] ---------------Start Spec_model Prefill-----------
             # [xjm:] draft tokens is useless, therefore not need logit_processor
             draft_token = self.spec_model.topK_genrate(hidden_states, input_ids)
-            print(draft_token)
+            # print(draft_token)
             # print(self.tokenizer.decode(draft_token[0][0]))
             # [xjm:] ---------------End Spec_model Prefill-----------
         # [xjm:] ---------------End Mer_model Prefill-----------
         
         
         # [xjm:] ---------------Start Mer_model Decode----------
+        # [xjm:] Recode and save the attention weights
+        spec_attn = None
+        ori_attn = None
         with torch.inference_mode():
             for idx in range(max_length):
                 # [xjm:] ---------------Start Ori_model Decode---------------
                 outputs = self.ori_model.model(
                     input_ids = input_ids[:,-1:],
                     past_key_values = past_key_values,
+                    output_attentions = output_attentions
                 )
                 last_hidden_states = outputs[0]
+                if output_attentions:
+                    attn_data = torch.cat(outputs[3],dim=0)
+                    if ori_attn == None:
+                        ori_attn = [attn_data,]
+                    else:
+                        ori_attn.append(attn_data)
+
                 hiddes_states_new = torch.cat(outputs["hidden_states"],dim=-1)
                 orig = self.ori_model.lm_head(last_hidden_states)
                 if logits_processor is not None:
@@ -161,7 +174,13 @@ class Mer_Model(nn.Module):
                 # [xjm:] ---------------End Ori_model Decode---------------
                 
                 # [xjm:] ---------------Start Spec_model Decode---------------
-                draft_token = self.spec_model.topK_genrate(hiddes_states_new, input_ids)
+                outputs = self.spec_model.topK_genrate(hiddes_states_new, input_ids, output_attentions = output_attentions)
+                if output_attentions:
+                    if spec_attn == None:
+                        spec_attn = [outputs[1],]
+                    else:
+                        spec_attn.append(outputs[1])
+                
                 # [xjm:] ---------------End Spec_model Decode---------------
                 
                 if stop_token_id in input_ids[0, input_len:].tolist():
@@ -170,11 +189,14 @@ class Mer_Model(nn.Module):
                     break
                 if input_ids.shape[1] > max_length:
                     break
+            if output_attentions:
+                import pickle
+                # [xjm:] Save the attention weights
+                with open("/home/xujiaming/xujiaming/Paper/SpecKV/SpecKV/attn_data/ori_attn.pkl", "wb") as f:
+                    pickle.dump(ori_attn, f)
+                with open("/home/xujiaming/xujiaming/Paper/SpecKV/SpecKV/attn_data/spec_attn.pkl", "wb") as f:
+                    pickle.dump(spec_attn, f)
             return input_ids
-                    
-                
-                
-            
 
     @classmethod
     def from_pretrained(

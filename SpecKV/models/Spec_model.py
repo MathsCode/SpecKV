@@ -303,6 +303,7 @@ class LlamaAttention(nn.Module):
 
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        
         attn_output = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
@@ -420,7 +421,7 @@ class LlamaDecoderLayeremb(nn.Module):
 
         hidden_states = self.hidden_norm(hidden_states)
         input_emb = self.input_layernorm(input_emb)
-
+        
         hidden_states = torch.cat((input_emb, hidden_states), dim=-1)
 
 
@@ -683,18 +684,22 @@ class Model(nn.Module):
         if use_cache:
             next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
         hidden_states = layer_outputs[0]
-
-
+        
+        # [xjm:] add attention profile
+        model_outputs = (hidden_states,)
+        if output_attentions:
+            model_outputs += (layer_outputs[1],)
+            
         if use_cache:
-            return hidden_states, next_decoder_cache
+            model_outputs += (next_decoder_cache,)
 
-        return hidden_states
+        return model_outputs
 
     def reset_kv(self):
         self.stable_kv = None
 
     @torch.no_grad()
-    def topK_genrate(self, hidden_states, input_ids):
+    def topK_genrate(self, hidden_states, input_ids, output_attentions = False):
 
         input_ids = input_ids.to(hidden_states.device)
         top_k = self.top_k
@@ -706,14 +711,14 @@ class Model(nn.Module):
         # with Timer("draft many"):
         if hasattr(self, "stable_kv") and self.stable_kv is not None:
             kv_len = self.stable_kv[0][0].shape[2]
-            print('input_ids',input_ids[:, kv_len:])
-            out_hidden, past_key_values = self(hidden_states, input_ids=input_ids[:, kv_len:],
-                                               past_key_values=self.stable_kv, use_cache=True)
+            # print(kv_len)
+            model_outputs = self(hidden_states, input_ids=input_ids[:, kv_len:],
+                                               past_key_values=self.stable_kv, use_cache=True,output_attentions = output_attentions)
         else:
-            print('input_ids',input_ids)
-            out_hidden, past_key_values = self(hidden_states, input_ids=input_ids, use_cache=True)
-        self.stable_kv = past_key_values
-        last_hidden = out_hidden[:, -1]
+            model_outputs = self(hidden_states, input_ids=input_ids, use_cache=True, output_attentions=output_attentions)
+        
+        self.stable_kv = model_outputs[2 if output_attentions else 1]
+        last_hidden = model_outputs[0][:, -1]
 
         # last_headout = head(last_hidden)
         last_headout = self.lm_head(self.norm(last_hidden))
@@ -725,6 +730,8 @@ class Model(nn.Module):
             draft_token = topk_index
         else:
             draft_token = topk_index+self.d2t[topk_index]
+        if output_attentions:
+            return draft_token, model_outputs[1]
         return draft_token
 
 
