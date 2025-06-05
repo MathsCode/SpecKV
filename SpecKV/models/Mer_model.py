@@ -64,6 +64,7 @@ class Mer_Model(nn.Module):
             top_k=0.0,
             max_length=2048,
             output_attentions = False,
+            use_SpecKV = False,
     ):
         stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
 
@@ -100,7 +101,8 @@ class Mer_Model(nn.Module):
         
         input_len = input_ids.shape[1]
         
-        
+        spec_attn = None
+        ori_attn = None
         # [xjm:] ---------------Start Mer_Model Prefill--------------
         with torch.inference_mode():
             # [xjm:] ---------------Start Ori_model Prefill--------------
@@ -133,7 +135,10 @@ class Mer_Model(nn.Module):
             
             # [xjm:] ---------------Start Spec_model Prefill-----------
             # [xjm:] draft tokens is useless, therefore not need logit_processor
-            draft_token = self.spec_model.topK_genrate(hidden_states, input_ids)
+            outputs = self.spec_model.topK_genrate(hidden_states, input_ids,output_attentions = output_attentions)
+            if output_attentions:
+                spec_attn = [outputs[1][:,:,-1:],]
+                
             # print(draft_token)
             # print(self.tokenizer.decode(draft_token[0][0]))
             # [xjm:] ---------------End Spec_model Prefill-----------
@@ -142,8 +147,7 @@ class Mer_Model(nn.Module):
         
         # [xjm:] ---------------Start Mer_model Decode----------
         # [xjm:] Recode and save the attention weights
-        spec_attn = None
-        ori_attn = None
+
         with torch.inference_mode():
             for idx in range(max_length):
                 # [xjm:] ---------------Start Ori_model Decode---------------
@@ -176,10 +180,8 @@ class Mer_Model(nn.Module):
                 # [xjm:] ---------------Start Spec_model Decode---------------
                 outputs = self.spec_model.topK_genrate(hiddes_states_new, input_ids, output_attentions = output_attentions)
                 if output_attentions:
-                    if spec_attn == None:
-                        spec_attn = [outputs[1],]
-                    else:
-                        spec_attn.append(outputs[1])
+                    spec_attn.append(outputs[1])
+                    
                 
                 # [xjm:] ---------------End Spec_model Decode---------------
                 
