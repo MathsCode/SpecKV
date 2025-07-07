@@ -648,6 +648,7 @@ class LlamaAttention(nn.Module):
             past_key_value: Optional[Tuple[torch.Tensor]] = None,
             output_attentions: bool = False,
             use_cache: bool = False,
+            SpecKV_index: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
@@ -740,7 +741,18 @@ class LlamaAttention(nn.Module):
         attn_weights = nn.functional.softmax(
             attn_weights, dim=-1, dtype=torch.float32
         ).to(query_states.dtype)
-        attn_output = torch.matmul(attn_weights, value_states)
+        
+        # attn_weights.shape = [1, 32, 1, seqlen]
+        # value_states.shape = [1, 32, seqlen, 128]
+        # attn_weights.shape = [1, 32, 1, part_len]
+        # value_states.shape = [1, 32, part_len, 128]
+        if SpecKV_index is not None:
+            attn_weights_extract = torch.gather(attn_weights, dim = -1, index = SpecKV_index)
+            SpecKV_index = SpecKV_index.squeeze(2).unsqueeze(-1).expand(-1, -1, -1, value_states.shape[-1])
+            value_states_extract = torch.gather(value_states, dim = 2, index = SpecKV_index)
+            attn_output = torch.matmul(attn_weights_extract, value_states_extract)
+        else:
+            attn_output = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
@@ -806,6 +818,8 @@ class LlamaDecoderLayer(nn.Module):
             past_key_value: Optional[Tuple[torch.Tensor]] = None,
             output_attentions: Optional[bool] = False,
             use_cache: Optional[bool] = False,
+            # [xjm:] add the SpecKV control and param
+            SpecKV_index: Optional[torch.Tensor] = None,
     ) -> Tuple[
         torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
     ]:
@@ -843,6 +857,8 @@ class LlamaDecoderLayer(nn.Module):
             past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
+            # [xjm:] add the SpecKV param
+            SpecKV_index = SpecKV_index,
         )
         hidden_states = residual + hidden_states
 
@@ -1054,6 +1070,7 @@ class LlamaModel(LlamaPreTrainedModel):
             output_attentions: Optional[bool] = None,
             output_hidden_states: Optional[bool] = None,
             return_dict: Optional[bool] = None,
+            SpecKV_index: Optional[torch.Tensor] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = (
             output_attentions
@@ -1166,6 +1183,7 @@ class LlamaModel(LlamaPreTrainedModel):
                     past_key_value=past_key_value,
                     output_attentions=output_attentions,
                     use_cache=use_cache,
+                    SpecKV_index=SpecKV_index,
                 )
 
             hidden_states = layer_outputs[0]

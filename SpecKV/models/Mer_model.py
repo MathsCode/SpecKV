@@ -65,6 +65,8 @@ class Mer_Model(nn.Module):
             max_length=2048,
             output_attentions = False,
             use_SpecKV = False,
+            SpecKV_ratio = 0.2,
+            stop_criteria = None,
     ):
         stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
 
@@ -135,12 +137,16 @@ class Mer_Model(nn.Module):
             
             # [xjm:] ---------------Start Spec_model Prefill-----------
             # [xjm:] draft tokens is useless, therefore not need logit_processor
-            outputs = self.spec_model.topK_genrate(hidden_states, input_ids,output_attentions = output_attentions)
-            if output_attentions:
-                spec_attn = [outputs[1][:,:,-1:],]
-                
-            # print(draft_token)
-            # print(self.tokenizer.decode(draft_token[0][0]))
+            spec_top_index = None
+            # outputs = self.spec_model.topK_genrate(hidden_states, input_ids,output_attentions = output_attentions)
+            # if output_attentions:
+            #     spec_attn = [outputs[1][:,:,-1:],]
+            #     if use_SpecKV:
+            #         spec_top_value, spec_top_index = torch.topk(outputs[1][:,:,-1:], int(outputs[1][:,:,-1:].shape[-1]*SpecKV_ratio), dim=-1)
+            #         spec_top_index = spec_top_index+1
+            #         spec_top_index = torch.cat([spec_top_index, torch.zeros_like(spec_top_index[...,:1].to(spec_top_index.device))], dim=-1)
+
+
             # [xjm:] ---------------End Spec_model Prefill-----------
         # [xjm:] ---------------End Mer_model Prefill-----------
         
@@ -154,7 +160,8 @@ class Mer_Model(nn.Module):
                 outputs = self.ori_model.model(
                     input_ids = input_ids[:,-1:],
                     past_key_values = past_key_values,
-                    output_attentions = output_attentions
+                    output_attentions = output_attentions,
+                    SpecKV_index = spec_top_index if use_SpecKV else None,
                 )
                 last_hidden_states = outputs[0]
                 if output_attentions:
@@ -178,10 +185,14 @@ class Mer_Model(nn.Module):
                 # [xjm:] ---------------End Ori_model Decode---------------
                 
                 # [xjm:] ---------------Start Spec_model Decode---------------
-                outputs = self.spec_model.topK_genrate(hiddes_states_new, input_ids, output_attentions = output_attentions)
-                if output_attentions:
-                    spec_attn.append(outputs[1])
-                    
+                # outputs = self.spec_model.topK_genrate(hiddes_states_new, input_ids, output_attentions = output_attentions)
+                # if output_attentions:
+                #     spec_attn.append(outputs[1])
+                #     if use_SpecKV:
+                #         spec_top_value, spec_top_index = torch.topk(outputs[1], int(outputs[1].shape[-1]*SpecKV_ratio), dim=-1)
+                #         spec_top_index = spec_top_index+1
+                #         spec_top_index = torch.cat([spec_top_index, torch.zeros_like(spec_top_index[...,:1].to(spec_top_index.device))], dim=-1)
+                        
                 
                 # [xjm:] ---------------End Spec_model Decode---------------
                 
@@ -191,6 +202,16 @@ class Mer_Model(nn.Module):
                     break
                 if input_ids.shape[1] > max_length:
                     break
+                
+                is_stoped = False
+                # [xjm:] check stop criteria
+                for stop_criteria_rule in stop_criteria:
+                    if input_ids[0, -len(stop_criteria_rule):].tolist() == stop_criteria_rule:
+                        is_stoped = True
+                        break
+                if is_stoped:
+                    break
+                
             if output_attentions:
                 import pickle
                 # [xjm:] Save the attention weights

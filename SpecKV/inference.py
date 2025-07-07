@@ -79,7 +79,7 @@ def main(args):
 
         input_ids = tokenizer([prompt],add_special_tokens=False,).input_ids
         print(len(input_ids[0]))
-        output_ids = mer_model(torch.as_tensor(input_ids).cuda(),output_attentions = True)
+        output_ids = mer_model(torch.as_tensor(input_ids).cuda(),output_attentions = True, use_SpecKV = True, SpecKV_ratio = 0.5)
         output_ids = output_ids[0][len(input_ids[0]):]
         output = tokenizer.decode(
                         output_ids,

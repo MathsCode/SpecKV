@@ -22,17 +22,8 @@ def main(args):
     questions = load_questions(dataset_path,args.begin,args.end)
     
     # two special tokens are used to indicate the beginning and end of thinking content
-    # <think> and </think>  
-    # id: 151667 and 151668 for Qwen3 models
-    # id: 128013 and 128014 for Llama3 models
-    if "Qwen" in args.model:
-        start_think_id = 151667
-        end_think_id = 151668
-    elif "Llama" in args.model:
-        start_think_id = 128013
-        end_think_id = 128014
-    else:
-        raise ValueError("Unsupported model type. Please use Qwen3 or Llama3 models.")
+    # <think> and </think> 
+    # id: 151667 and 151668
 
 
     for question in tqdm(questions):
@@ -47,9 +38,7 @@ def main(args):
             messages,
             tokenize=False,
             add_generation_prompt=True,
-            enable_thinking=args.thinking, 
-            # Switches between thinking and non-thinking modes. Default is True.
-            # the param is effective for Qwen3 models only
+            enable_thinking=False,
         )
         model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
 
@@ -61,24 +50,14 @@ def main(args):
         
             
         output_ids = generated_ids[0][len(model_inputs.input_ids[0]):].tolist() 
-        start_think_index = output_ids.index(start_think_id) if start_think_id in output_ids else -1
-        end_think_index = output_ids.index(end_think_id) if end_think_id in output_ids else -1
-        thinking_len = end_think_index - start_think_index + 1 if  end_think_index != -1 else 0
-        response_len = len(output_ids) - thinking_len
+
+     
  
         # the result will begin with thinking content in <think></think> tags, followed by the actual response
         # print(tokenizer.decode(output_ids, skip_special_tokens=True))
         output = tokenizer.decode(output_ids, skip_special_tokens=True)
-        # save the report
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        with open(save_path, 'a') as f:
-            report = {
-                "question_id": question["question_id"],
-                "thinking_len": thinking_len,
-                "response_len": response_len,
-                "output": output,
-            }
-            f.write(json.dumps(report, ensure_ascii=False) + '\n')
+        print(output)
+   
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

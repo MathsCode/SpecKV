@@ -1,0 +1,15 @@
+------------------Qwen3-32B-result.jsonl Load Complete-----------------
+Thinking: 0, Response: 36550, Total: 36550
+------------------Qwen3-1.7B-result.jsonl Load Complete-----------------
+Thinking: 0, Response: 36887, Total: 36887
+------------------Qwen3-30B-A3B-result.jsonl Load Complete-----------------
+Thinking: 0, Response: 35328, Total: 35328
+------------------Qwen3-0.6B-result.jsonl Load Complete-----------------
+Thinking: 0, Response: 21699, Total: 21699
+------------------Qwen3-4B-result.jsonl Load Complete-----------------
+Thinking: 0, Response: 38009, Total: 38009
+------------------Qwen3-8B-result.jsonl Load Complete-----------------
+Thinking: 0, Response: 38849, Total: 38849
+------------------Qwen3-14B-result.jsonl Load Complete-----------------
+Thinking: 0, Response: 36347, Total: 36347
+Total Thinking: 0, Total Response: 243669
