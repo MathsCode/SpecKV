@@ -9,7 +9,9 @@ from transformers import AutoTokenizer
 import os
 from transformers import PreTrainedModel, PretrainedConfig, AutoConfig
 
-from .Ori_llama_model import LlamaForCausalLM as Ori_Model
+from .Ori_llama_model import LlamaForCausalLM as Ori_Model_llama
+from .Ori_qwen_model import Qwen3ForCausalLM as Ori_Model_Qwen
+
 from .Spec_model import Model as Spec_Model
 
 from .utils import *
@@ -63,7 +65,7 @@ class Mer_Model(nn.Module):
             top_p=0.0,
             top_k=0.0,
             max_length=2048,
-            output_attentions = False,
+            output_attentions = False, # deprecated  param
             use_SpecKV = False,
             SpecKV_ratio = 0.2,
             stop_criteria = None,
@@ -135,41 +137,41 @@ class Mer_Model(nn.Module):
             # [xjm:] ---------------End Ori_model Prefill--------------
         
             
-            # [xjm:] ---------------Start Spec_model Prefill-----------
-            # [xjm:] draft tokens is useless, therefore not need logit_processor
+           
             spec_top_index = None
-            # outputs = self.spec_model.topK_genrate(hidden_states, input_ids,output_attentions = output_attentions)
-            # if output_attentions:
-            #     spec_attn = [outputs[1][:,:,-1:],]
-            #     if use_SpecKV:
-            #         spec_top_value, spec_top_index = torch.topk(outputs[1][:,:,-1:], int(outputs[1][:,:,-1:].shape[-1]*SpecKV_ratio), dim=-1)
-            #         spec_top_index = spec_top_index+1
-            #         spec_top_index = torch.cat([spec_top_index, torch.zeros_like(spec_top_index[...,:1].to(spec_top_index.device))], dim=-1)
-
-
-            # [xjm:] ---------------End Spec_model Prefill-----------
+            if use_SpecKV:
+                
+                # [xjm:] ---------------Start Spec_model Prefill-----------
+                # [xjm:] draft tokens is useless, therefore not need logit_processor
+                outputs = self.spec_model.topK_genrate(hidden_states, input_ids,output_attentions = use_SpecKV)
+                # spec_attn = [outputs[1][:,:,-1:],]
+                spec_top_value, spec_top_index = torch.topk(outputs[1][:,:,-1:], int(outputs[1][:,:,-1:].shape[-1]*SpecKV_ratio), dim=-1)
+                spec_top_index = spec_top_index+1
+                spec_top_index = torch.cat([spec_top_index, torch.zeros_like(spec_top_index[...,:1].to(spec_top_index.device))], dim=-1)
+                # [xjm:] ---------------End Spec_model Prefill-----------
+                
         # [xjm:] ---------------End Mer_model Prefill-----------
         
         
         # [xjm:] ---------------Start Mer_model Decode----------
         # [xjm:] Recode and save the attention weights
-
         with torch.inference_mode():
             for idx in range(max_length):
+                
                 # [xjm:] ---------------Start Ori_model Decode---------------
                 outputs = self.ori_model.model(
                     input_ids = input_ids[:,-1:],
                     past_key_values = past_key_values,
-                    output_attentions = output_attentions,
+                    # output_attentions = output_attentions,
                     SpecKV_index = spec_top_index if use_SpecKV else None,
                 )
                 last_hidden_states = outputs[0]
-                if output_attentions:
-                    attn_data = torch.cat(outputs[3],dim=0)
-                    if ori_attn == None:
-                        ori_attn = [attn_data,]
-                    else:
-                        ori_attn.append(attn_data)
+                # if output_attentions:
+                #     attn_data = torch.cat(outputs[3],dim=0)
+                #     if ori_attn == None:
+                #         ori_attn = [attn_data,]
+                #     else:
+                #         ori_attn.append(attn_data)
 
                 hiddes_states_new = torch.cat(outputs["hidden_states"],dim=-1)
                 orig = self.ori_model.lm_head(last_hidden_states)
@@ -184,17 +186,16 @@ class Mer_Model(nn.Module):
                 input_ids = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
                 # [xjm:] ---------------End Ori_model Decode---------------
                 
-                # [xjm:] ---------------Start Spec_model Decode---------------
-                # outputs = self.spec_model.topK_genrate(hiddes_states_new, input_ids, output_attentions = output_attentions)
-                # if output_attentions:
-                #     spec_attn.append(outputs[1])
-                #     if use_SpecKV:
-                #         spec_top_value, spec_top_index = torch.topk(outputs[1], int(outputs[1].shape[-1]*SpecKV_ratio), dim=-1)
-                #         spec_top_index = spec_top_index+1
-                #         spec_top_index = torch.cat([spec_top_index, torch.zeros_like(spec_top_index[...,:1].to(spec_top_index.device))], dim=-1)
-                        
                 
-                # [xjm:] ---------------End Spec_model Decode---------------
+                
+                if use_SpecKV:
+                    # [xjm:] ---------------Start Spec_model Decode---------------
+                    outputs = self.spec_model.topK_genrate(hiddes_states_new, input_ids, output_attentions = use_SpecKV)
+                    # spec_attn.append(outputs[1])
+                    spec_top_value, spec_top_index = torch.topk(outputs[1], int(outputs[1].shape[-1]*SpecKV_ratio), dim=-1)
+                    spec_top_index = spec_top_index+1
+                    spec_top_index = torch.cat([spec_top_index, torch.zeros_like(spec_top_index[...,:1].to(spec_top_index.device))], dim=-1)
+                    # [xjm:] ---------------End Spec_model Decode---------------
                 
                 if stop_token_id in input_ids[0, input_len:].tolist():
                     break
@@ -212,13 +213,13 @@ class Mer_Model(nn.Module):
                 if is_stoped:
                     break
                 
-            if output_attentions:
-                import pickle
-                # [xjm:] Save the attention weights
-                with open("/home/xujiaming/xujiaming/Paper/SpecKV/SpecKV/attn_data/ori_attn.pkl", "wb") as f:
-                    pickle.dump(ori_attn, f)
-                with open("/home/xujiaming/xujiaming/Paper/SpecKV/SpecKV/attn_data/spec_attn.pkl", "wb") as f:
-                    pickle.dump(spec_attn, f)
+            # if output_attentions:
+            #     import pickle
+            #     # [xjm:] Save the attention weights
+            #     with open("/home/xujiaming/xujiaming/Paper/SpecKV/SpecKV/attn_data/ori_attn.pkl", "wb") as f:
+            #         pickle.dump(ori_attn, f)
+            #     with open("/home/xujiaming/xujiaming/Paper/SpecKV/SpecKV/attn_data/spec_attn.pkl", "wb") as f:
+            #         pickle.dump(spec_attn, f)
             return input_ids
 
     @classmethod
@@ -230,10 +231,17 @@ class Mer_Model(nn.Module):
         **kwargs,
     ):
         Type = AutoConfig.from_pretrained(Ori_model_path).architectures[0]
-        # if Type == 'LlamaForCausalLM':
-        ori_model = Ori_Model.from_pretrained(
-            Ori_model_path, **kwargs
-        )
+        if Type == 'LlamaForCausalLM':
+            ori_model = Ori_Model_llama.from_pretrained(
+                Ori_model_path, **kwargs
+            )
+        elif Type == 'Qwen3ForCausalLM':
+            ori_model = Ori_Model_Qwen.from_pretrained(
+                Ori_model_path, **kwargs
+            )
+        else:
+            raise ValueError(f"Unsupported model type: {Type}")
+
         model_dtype = ori_model.dtype
         device = ori_model.model.layers[-1].self_attn.q_proj.weight.device
         spec_model = Spec_Model.from_pretrained(Spec_model_path = Spec_model_path, Ori_model_path = Ori_model_path, dtype = model_dtype, top_K=top_k,device = device)
