@@ -30,10 +30,16 @@ def load_questions(question_file: str, begin: Optional[int], end: Optional[int])
 
 def main(args):
     
-    if args.model == "Llama3-8B":
+    if args.model == "Llama-3.1-8B-Instruct":
         Spec_model_path = "/home/xujiaming/xujiaming/models/EAGLE3-LLaMA3.1-Instruct-8B"
-        Ori_model_path = "/share/public/public_models/Llama-3.1-8B-Instruct"
-
+    elif args.model == "Qwen3-8B":
+        Spec_model_path = "/home/xujiaming/xujiaming/models/qwen3_8b_eagle3"
+    elif args.model == "DeepSeek-R1-Distill-Llama-8B":
+        Spec_model_path = "/home/xujiaming/xujiaming/models/EAGLE3-DeepSeek-R1-Distill-LLaMA-8B"
+    else:
+        raise ValueError("Unsupported model type. Please use Llama-3.1-8B-Instruct or Qwen3-8B.")
+    
+    Ori_model_path = "/share/public/public_models/"+args.model
     mer_model = Mer_Model.from_pretrained(
         Spec_model_path = Spec_model_path,
         Ori_model_path = Ori_model_path,
@@ -58,10 +64,14 @@ def main(args):
     
     for question in tqdm(questions):
         prompt = question["turns"][0]
-        messages = [
-            {"role": "system",
-                "content": "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."},
-        ]
+        if args.model == "DeepSeek-R1-Distill-Llama-8B":
+            messages = []
+        else:
+            messages = [
+                {"role": "system",
+                    "content": "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."},
+            ]
+            
 
         # prompt = "What is the capital of China?"
 
@@ -93,7 +103,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", "-d", type=str, default="mt-bench")
     # dataset: mt-bench, gsm8k, alpaca, sum, vicuna-bench
-    parser.add_argument("--model", "-m", type=str, default="Llama3-8B")
+    parser.add_argument("--model", "-m", type=str, default="Llama-3.1-8B-Instruct")
     parser.add_argument("--begin", "-b", type=int,default=0)
     parser.add_argument("--end", "-e", type=int,default=1)
     parser.add_argument("--thinking", "-t", action="store_true", default=False)

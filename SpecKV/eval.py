@@ -34,6 +34,7 @@ class SpecKV_Model(LM):
             device_map="auto",
             low_cpu_mem_usage=True
         )
+        self.model_name = model_name
         self.device = torch.device(device)
         self.batch_size = int(batch_size)
         self.tokenizer = self.mer_model.get_tokenizer()
@@ -68,11 +69,35 @@ class SpecKV_Model(LM):
                 stop_sequences_id = [i[1:] for i in self.tokenizer(stop_sequences).input_ids]
             else:
                 stop_sequences_id = self.tokenizer(stop_sequences).input_ids
-            inputs = self.tokenizer(context, return_tensors="pt").input_ids
             
-            output_ids = self.mer_model(torch.as_tensor(inputs).to(self.device), stop_criteria = stop_sequences_id, use_SpecKV=optimize, SpecKV_ratio=SpecKV_ratio)
             
-            generated_text = self.tokenizer.decode(output_ids[0][len(inputs[0]):])
+            if self.model_name == "DeepSeek-R1-Distill-Llama-8B":
+                messages = []
+            else:
+                messages = [
+                {"role": "system",
+                "content": "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."},
+            ]
+            messages.append({
+                "role": "user",
+                "content": context}
+            )
+            
+            prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            
+            # inputs = self.tokenizer(context, return_tensors="pt").input_ids
+            
+            input_ids = self.tokenizer([prompt],add_special_tokens=False,).input_ids
+            
+            
+            
+            output_ids = self.mer_model(torch.as_tensor(input_ids).to(self.device), stop_criteria = stop_sequences_id, use_SpecKV=optimize, SpecKV_ratio=SpecKV_ratio)
+            
+            generated_text = self.tokenizer.decode(output_ids[0][len(input_ids[0]):])
             res.append(generated_text)
             
         return res
