@@ -4,3 +4,5 @@ motivation/result_thinking
 SpecKV/attn_data
 SpecKV/insight
 SpecKV/eval_results
+SpecKV/pred
+SpecKV/pred_e
