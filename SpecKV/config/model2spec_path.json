@@ -1,0 +1,5 @@
+{
+    "Meta-Llama-3.1-8B-Instruct": "/home/xujiaming/xujiaming/models/EAGLE3-LLaMA3.1-Instruct-8B",
+    "Qwen3-8B": "/home/xujiaming/xujiaming/models/qwen3_8b_eagle3",
+    "DeepSeek-R1-Distill-Llama-8B": "/home/xujiaming/xujiaming/models/EAGLE3-DeepSeek-R1-Distill-LLaMA-8B"
+}

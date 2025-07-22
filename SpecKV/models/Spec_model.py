@@ -194,7 +194,11 @@ class LlamaAttention(nn.Module):
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.max_position_embeddings = config.max_position_embeddings
-
+        
+        self.scaling = self.head_dim**-0.5
+        self.attention_dropout = 0.0
+        self.is_causal = True
+        
         if (self.head_dim * self.num_heads) != self.hidden_size:
             raise ValueError(
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
@@ -240,6 +244,7 @@ class LlamaAttention(nn.Module):
             past_key_value: Optional[Tuple[torch.Tensor]] = None,
             output_attentions: bool = False,
             use_cache: bool = False,
+            cu_seqlens_q = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
@@ -286,33 +291,48 @@ class LlamaAttention(nn.Module):
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-
-        if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
-            raise ValueError(
-                f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
-                f" {attn_weights.size()}"
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+        if query_states.shape[-2] > 1:
+            attention_interface = ALL_ATTENTION_FUNCTIONS["flash_attention_2"]
+            attention_mask = None
+            attn_output, attn_weights = attention_interface(
+                self,
+                query_states,
+                key_states,
+                value_states,
+                attention_mask,
+                dropout=0.0 if not self.training else self.attention_dropout,
+                scaling=self.head_dim**-0.5,
+                cu_seqlens_q  = cu_seqlens_q
             )
+        else:
+            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
-        if attention_mask is not None:
-            if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
+            if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
                 raise ValueError(
-                    f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+                    f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
+                    f" {attn_weights.size()}"
                 )
-            attn_weights = attn_weights + attention_mask
 
-        # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        
-        attn_output = torch.matmul(attn_weights, value_states)
+            if attention_mask is not None:
+                if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
+                    raise ValueError(
+                        f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+                    )
+                attn_weights = attn_weights + attention_mask
 
-        if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
-            raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
-                f" {attn_output.size()}"
-            )
+            # upcast attention to fp32
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            
+            attn_output = torch.matmul(attn_weights, value_states)
 
-        attn_output = attn_output.transpose(1, 2).contiguous()
+            if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
+                raise ValueError(
+                    f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
+                    f" {attn_output.size()}"
+                )
+
+            attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
         if self.config.pretraining_tp > 1:
@@ -402,6 +422,7 @@ class LlamaDecoderLayeremb(nn.Module):
             past_key_value: Optional[Tuple[torch.Tensor]] = None,
             output_attentions: Optional[bool] = False,
             use_cache: Optional[bool] = False,
+            cu_seqlens_q = None,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
         Args:
@@ -435,6 +456,7 @@ class LlamaDecoderLayeremb(nn.Module):
             past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
+            cu_seqlens_q = cu_seqlens_q,
         )
         hidden_states = residual + hidden_states
 
@@ -622,6 +644,7 @@ class Model(nn.Module):
             use_cache: Optional[bool] = None,
             output_attentions: Optional[bool] = None,
             output_hidden_states: Optional[bool] = None,
+            cu_seqlens_q = None,
             return_dict: Optional[bool] = None,
             std=None
     ):
@@ -650,13 +673,16 @@ class Model(nn.Module):
             position_ids = position_ids.view(-1, seq_length).long()
 
         #position_ids=position_ids//4
-        if attention_mask is None:
-            attention_mask = torch.ones(
-                (batch_size, seq_length_with_past), dtype=torch.bool, device=hidden_states.device
-            )
-        attention_mask = self._prepare_decoder_attention_mask(
-            attention_mask, (batch_size, seq_length), hidden_states, past_key_values_length
-        )
+        
+        # if attention_mask is None:
+        #     attention_mask = torch.ones(
+        #         (batch_size, seq_length_with_past), dtype=torch.bool, device=hidden_states.device
+        #     )
+        # attention_mask = self._prepare_decoder_attention_mask(
+        #     attention_mask, (batch_size, seq_length), hidden_states, past_key_values_length
+        # )
+        
+        attention_mask = None
 
         # if self.gradient_checkpointing and self.training:
         #    if use_cache:
@@ -680,6 +706,7 @@ class Model(nn.Module):
             past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=True,
+            cu_seqlens_q = cu_seqlens_q,
         )
         if use_cache:
             next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
@@ -699,7 +726,7 @@ class Model(nn.Module):
         self.stable_kv = None
 
     @torch.no_grad()
-    def topK_genrate(self, hidden_states, input_ids, output_attentions = False):
+    def topK_genrate(self, hidden_states, input_ids, output_attentions = False, cu_seqlens_q = None):
 
         input_ids = input_ids.to(hidden_states.device)
         top_k = self.top_k
@@ -712,10 +739,15 @@ class Model(nn.Module):
         if hasattr(self, "stable_kv") and self.stable_kv is not None:
             kv_len = self.stable_kv[0][0].shape[2]
             # print(kv_len)
-            model_outputs = self(hidden_states, input_ids=input_ids[:, kv_len:],
-                                               past_key_values=self.stable_kv, use_cache=True,output_attentions = output_attentions)
+            model_outputs = self(hidden_states, 
+                                input_ids=input_ids[:, kv_len:],
+                                past_key_values=self.stable_kv, 
+                                use_cache=True,
+                                output_attentions = output_attentions,
+                                cu_seqlens_q = cu_seqlens_q,
+                                )
         else:
-            model_outputs = self(hidden_states, input_ids=input_ids, use_cache=True, output_attentions=output_attentions)
+            model_outputs = self(hidden_states, input_ids=input_ids, use_cache=True, output_attentions=output_attentions, cu_seqlens_q = cu_seqlens_q,)
         
         self.stable_kv = model_outputs[2 if output_attentions else 1]
         last_hidden = model_outputs[0][:, -1]

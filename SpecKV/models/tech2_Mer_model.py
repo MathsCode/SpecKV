@@ -41,22 +41,6 @@ class Mer_Model(nn.Module):
         # [xjm:] information of spec_model
         self.spec_model = spec_model
         
-        # [xjm:] Do not consider the different devices.
-        # low_memory = False
-        # device = base_model.model.layers[-1].self_attn.q_proj.weight.device
-        # if device != base_model.lm_head.weight.device:
-        #     self.Spec_model.diff_device = True
-        #     if not low_memory:
-        #         self.Spec_model.headweight = base_model.lm_head.weight.clone().to(device)
-        #     else:
-        #         self.Spec_model.layer_device = device
-
-        # else:
-        #     self.Spec_model.diff_device = False
-        # if config.vocab_size==config.draft_vocab_size:
-        #     del self.Spec_model.d2t,self.Spec_model.t2d
-        # load_=self.Spec_model.load_state_dict(ea_layer_state_dict, strict=False)
-        # self.Spec_model.to(self.base_model.dtype).to(device)
     
     def forward(
             self,
@@ -67,11 +51,8 @@ class Mer_Model(nn.Module):
             max_length=2048,
             max_gen_toks = 2048,
             output_attentions = False, # deprecated  param
-            use_SpecKV = False,
-            SpecKV_ratio = 0.2,
-            stop_criteria = [],
+            stop_criteria = None,
             multi_turn = False,
-            check_each_token = False
     ):
         stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
 
@@ -155,25 +136,57 @@ class Mer_Model(nn.Module):
             
            
             spec_top_index = None
-            if use_SpecKV:
                 
-                # [xjm:] ---------------Start Spec_model Prefill-----------
-                # [xjm:] draft tokens is useless, therefore not need logit_processor
-                outputs = self.spec_model.topK_genrate(hidden_states, input_ids,output_attentions = use_SpecKV, cu_seqlens_q = cu_seqlens_q)
-                # spec_attn = [outputs[1][:,:,-1:],]
-                # spec_top_value, spec_top_index = torch.topk(outputs[1][:,:,-1:], int(outputs[1][:,:,-1:].shape[-1]*SpecKV_ratio), dim=-1)
-                # spec_top_index = spec_top_index+1
-                # spec_top_index = torch.cat([spec_top_index, torch.zeros_like(spec_top_index[...,:1].to(spec_top_index.device))], dim=-1)
-                # [xjm:] ---------------End Spec_model Prefill-----------
+            # [xjm:] ---------------Start Spec_model Prefill-----------
+            # [xjm:] draft tokens is useless, therefore not need logit_processor
+            outputs = self.spec_model.topK_genrate(hidden_states, input_ids,output_attentions = True, cu_seqlens_q = cu_seqlens_q)
+            # spec_attn = [outputs[1][:,:,-1:],]
+            # [xjm:] ---------------End Spec_model Prefill-----------
             
-            
+            # Use difference SpecKV ratio
+            # for ratio in [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9]:
+            #     spec_top_value, spec_top_index = torch.topk(outputs[1][:,:,-1:], int(outputs[1][:,:,-1:].shape[-1]*ratio), dim=-1)
+            #     spec_top_index = spec_top_index+1
+            #     spec_top_index = torch.cat([spec_top_index, torch.zeros_like(spec_top_index[...,:1].to(spec_top_index.device))], dim=-1)
+                
+            #     outputs_tmp = self.ori_model.model(
+            #         input_ids = input_ids[:,-1:],
+            #         past_key_values = past_key_values,
+            #         # output_attentions = output_attentions,
+            #         SpecKV_index = spec_top_index,
+            #     )
+            #     current_length_data.sub_(1)
+            #     last_hidden_states = outputs_tmp[0]
+            #     # if output_attentions:
+            #     #     attn_data = torch.cat(outputs[3],dim=0)
+            #     #     if ori_attn == None:
+            #     #         ori_attn = [attn_data,]
+            #     #     else:
+            #     #         ori_attn.append(attn_data)
+
+            #     orig = self.ori_model.lm_head(last_hidden_states)
+            #     if logits_processor is not None:
+            #         logits = orig[:, -1]
+            #         logits = logits_processor(None, logits)
+            #         probabilities = torch.nn.functional.softmax(logits, dim=1)
+            #         token = torch.multinomial(probabilities, 1)
+            #     else:
+            #         token = torch.argmax(orig[:, -1])
+            #         token = token[None, None]
+            #     print("{}:{}".format(ratio,token))
+                
+                
         # [xjm:] ---------------End Mer_model Prefill-----------
         
         
-        # [xjm:] ---------------Start Mer_model Decode----------
-        # [xjm:] Recode and save the attention weights
         
-        with torch.inference_mode():
+        
+        
+        
+        
+        
+        # [xjm:] ---------------Start Mer_model Decode----------
+        
             # [xjm:] ---------------Mer_model first decode----------
             outputs = self.ori_model.model(
                     input_ids = input_ids[:,-1:],
@@ -201,23 +214,56 @@ class Mer_Model(nn.Module):
             hiddes_states_new=torch.cat(outputs["hidden_states"],dim=-1)
             
             
+            
+            
             # [xjm:] ---------------Spec_model first decode---------
             outputs = self.spec_model.topK_genrate(hiddes_states_new, input_ids, output_attentions = True)
-            spec_top_value, spec_top_index = torch.topk(outputs[1], int(outputs[1][:,:,-1:].shape[-1]*SpecKV_ratio), dim=-1)
-            spec_top_index = spec_top_index+1
-            spec_top_index = torch.cat([spec_top_index, torch.zeros_like(spec_top_index[...,:1].to(spec_top_index.device))], dim=-1)
-            
-            
-            
-            
+        
+            print("---------------------1 token------------------")
+            for ratio in [0.1, 0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9]:
+                spec_top_value, spec_top_index = torch.topk(outputs[1], int(outputs[1][:,:,-1:].shape[-1]*ratio), dim=-1)
+                spec_top_index = spec_top_index+1
+                spec_top_index = torch.cat([spec_top_index, torch.zeros_like(spec_top_index[...,:1].to(spec_top_index.device))], dim=-1)
+                
+                outputs_tmp = self.ori_model.model(
+                    input_ids = input_ids[:,-1:],
+                    past_key_values = past_key_values,
+                    # output_attentions = output_attentions,
+                    SpecKV_index = spec_top_index,
+                )
+                current_length_data.sub_(1)
+                last_hidden_states = outputs_tmp[0]
+                # if output_attentions:
+                #     attn_data = torch.cat(outputs[3],dim=0)
+                #     if ori_attn == None:
+                #         ori_attn = [attn_data,]
+                #     else:
+                #         ori_attn.append(attn_data)
+
+                orig = self.ori_model.lm_head(last_hidden_states)
+                if logits_processor is not None:
+                    logits = orig[:, -1]
+                    logits = logits_processor(None, logits)
+                    probabilities = torch.nn.functional.softmax(logits, dim=1)
+                    token = torch.multinomial(probabilities, 1)
+                else:
+                    token = torch.argmax(orig[:, -1])
+                    token = token[None, None]
+                print("{}:{}".format(ratio,token))
+        
+        
+        # [xjm:] Recode and save the attention weights
+        with torch.inference_mode():
             for idx in range(max_gen_toks - 1):
                 
                 # [xjm:] ---------------Start Ori_model Decode---------------
+                
+                # Baseline decode
                 outputs = self.ori_model.model(
                     input_ids = input_ids[:,-1:],
                     past_key_values = past_key_values,
                     # output_attentions = output_attentions,
-                    SpecKV_index = spec_top_index if use_SpecKV else None,
+                    SpecKV_index = None,
                 )
                 last_hidden_states = outputs[0]
                 # if output_attentions:
@@ -238,18 +284,57 @@ class Mer_Model(nn.Module):
                     token = torch.argmax(orig[:, -1])
                     token = token[None, None]
                 input_ids = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
+                print("baseline:{}".format(token))
+                
+                # remove the new added key
+                
+                
+                
                 # [xjm:] ---------------End Ori_model Decode---------------
                 
                 
                 
-                if use_SpecKV:
-                    # [xjm:] ---------------Start Spec_model Decode---------------
-                    outputs = self.spec_model.topK_genrate(hiddes_states_new, input_ids, output_attentions = use_SpecKV)
-                    # spec_attn.append(outputs[1])
-                    spec_top_value, spec_top_index = torch.topk(outputs[1], int(outputs[1].shape[-1]*SpecKV_ratio), dim=-1)
+                # [xjm:] ---------------Start Spec_model Decode---------------
+                outputs = self.spec_model.topK_genrate(hiddes_states_new, input_ids, output_attentions = True)
+                # spec_attn.append(outputs[1])
+                # [xjm:] ---------------End Spec_model Decode---------------
+                
+                
+                
+                
+                # Use difference SpecKV ratio
+                print("---------------------{} token------------------".format(idx+2))
+                for ratio in [0.1, 0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9]:
+                    spec_top_value, spec_top_index = torch.topk(outputs[1], int(outputs[1][:,:,-1:].shape[-1]*ratio), dim=-1)
                     spec_top_index = spec_top_index+1
                     spec_top_index = torch.cat([spec_top_index, torch.zeros_like(spec_top_index[...,:1].to(spec_top_index.device))], dim=-1)
-                    # [xjm:] ---------------End Spec_model Decode---------------
+                    
+                    outputs_tmp = self.ori_model.model(
+                        input_ids = input_ids[:,-1:],
+                        past_key_values = past_key_values,
+                        # output_attentions = output_attentions,
+                        SpecKV_index = spec_top_index,
+                    )
+                    current_length_data.sub_(1)
+                    last_hidden_states = outputs_tmp[0]
+                    # if output_attentions:
+                    #     attn_data = torch.cat(outputs[3],dim=0)
+                    #     if ori_attn == None:
+                    #         ori_attn = [attn_data,]
+                    #     else:
+                    #         ori_attn.append(attn_data)
+
+                    orig = self.ori_model.lm_head(last_hidden_states)
+                    if logits_processor is not None:
+                        logits = orig[:, -1]
+                        logits = logits_processor(None, logits)
+                        probabilities = torch.nn.functional.softmax(logits, dim=1)
+                        token = torch.multinomial(probabilities, 1)
+                    else:
+                        token = torch.argmax(orig[:, -1])
+                        token = token[None, None]
+                    print("{}:{}".format(ratio,token))
+                
                 
                 if stop_token_id in input_ids[0, input_len:].tolist():
                     break
@@ -258,14 +343,14 @@ class Mer_Model(nn.Module):
                 if input_ids.shape[1] > max_length:
                     break
                 
-                is_stoped = False
-                # [xjm:] check stop criteria
-                for stop_criteria_rule in stop_criteria:
-                    if input_ids[0, -len(stop_criteria_rule):].tolist() == stop_criteria_rule:
-                        is_stoped = True
-                        break
-                if is_stoped:
-                    break
+                # is_stoped = False
+                # # [xjm:] check stop criteria
+                # for stop_criteria_rule in stop_criteria:
+                #     if input_ids[0, -len(stop_criteria_rule):].tolist() == stop_criteria_rule:
+                #         is_stoped = True
+                #         break
+                # if is_stoped:
+                #     break
                 
             # if output_attentions:
             #     import pickle

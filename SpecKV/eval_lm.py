@@ -53,7 +53,7 @@ class SpecKV_Model(LM):
 
 
     def loglikelihood_rolling(self, requests: list[Instance]) -> list[tuple[float, bool]]:
-         raise NotImplementedError("loglikelihood_rolling is not implemented for this model.")
+        raise NotImplementedError("loglikelihood_rolling is not implemented for this model.")
 
 
 
@@ -64,12 +64,16 @@ class SpecKV_Model(LM):
             gen_kwargs = req.args[1]
             stop_sequences = gen_kwargs.get('until', [])
             optimize = gen_kwargs.get('optimize', None)
+            max_gen_toks = gen_kwargs.get('max_gen_toks', 1024)
             SpecKV_ratio = gen_kwargs.get('SpecKV_ratio', 0.2)
-            if self.stop_id_adjust:
-                stop_sequences_id = [i[1:] for i in self.tokenizer(stop_sequences).input_ids]
+            if stop_sequences:
+                if self.stop_id_adjust:
+                    stop_sequences_id = [i[1:] for i in self.tokenizer(stop_sequences).input_ids]
+                else:
+                    stop_sequences_id = self.tokenizer(stop_sequences).input_ids
             else:
-                stop_sequences_id = self.tokenizer(stop_sequences).input_ids
-            
+                stop_sequences_id = []
+
             
             if self.model_name == "DeepSeek-R1-Distill-Llama-8B":
                 messages = []
@@ -92,11 +96,16 @@ class SpecKV_Model(LM):
             # inputs = self.tokenizer(context, return_tensors="pt").input_ids
             
             input_ids = self.tokenizer([prompt],add_special_tokens=False,).input_ids
+
+            print("max_length:",max_gen_toks+len(input_ids[0]))
             
+            if max_gen_toks+len(input_ids[0]) > 100000:
+                res.append("None")
+                continue
             
-            
-            output_ids = self.mer_model(torch.as_tensor(input_ids).to(self.device), stop_criteria = stop_sequences_id, use_SpecKV=optimize, SpecKV_ratio=SpecKV_ratio)
-            
+
+            output_ids = self.mer_model(torch.as_tensor(input_ids).to(self.device), stop_criteria = stop_sequences_id, use_SpecKV=optimize, SpecKV_ratio=SpecKV_ratio, max_length = max(10240,max_gen_toks+len(input_ids[0])), max_gen_toks = max_gen_toks)
+
             generated_text = self.tokenizer.decode(output_ids[0][len(input_ids[0]):])
             res.append(generated_text)
             
@@ -122,7 +131,7 @@ def main(args):
 
     new_model = SpecKV_Model(Spec_model_path, args.model, batch_size=1, device="cuda")
 
-    task_name = "gsm8k_cot"
+    task_name = args.task
 
     if task_name == "gsm8k_cot_llama":
         stop_sequences = ["\nProblem:", "Problem:"] # this is for gsm8k_cot_llama
@@ -131,14 +140,14 @@ def main(args):
         stop_sequences = ["\nQ:", "Q:"] # this is for gsm8k_cot
         
     else:
-        stop_sequences = None
+        stop_sequences = []
 
     results = simple_evaluate(
         model=new_model,
         tasks=[task_name], 
         num_fewshot = 5,
         batch_size = 1,
-        # limit = 1,
+        limit = 10,
         gen_kwargs={"until": stop_sequences, 'optimize': args.optimize, 'SpecKV_ratio': args.ratio, 'model': args.model},
     )
 
@@ -158,7 +167,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", "-t", type=str, default="gsm8k_cot")
-    parser.add_argument("--model", "-m", type=str, default="Qwen3-8B")
+    parser.add_argument("--model", "-m", type=str, default="Llama-3.1-8B-Instruct")
     parser.add_argument("--optimize", "-o", action="store_true", default=False,
                         help="Whether to optimize the model for inference. Default is False.")
     parser.add_argument("--ratio", "-r", type=float, default=0.2,

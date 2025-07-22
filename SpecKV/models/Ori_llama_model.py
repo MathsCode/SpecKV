@@ -4,7 +4,7 @@
 
 """ PyTorch LLaMA model."""
 import math
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union, Callable, Unpack
 
 import torch
 import torch.nn.functional as F
@@ -12,6 +12,8 @@ import torch.utils.checkpoint
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
+from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
+from transformers.processing_utils import Unpack
 # [MODIFIED] Import from transformer library
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import (
@@ -28,6 +30,10 @@ from transformers.utils import (
 )
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers import LlamaConfig
+
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 
 logger = logging.get_logger(__name__)
 
@@ -555,7 +561,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
-class LlamaAttention(nn.Module):
+class LlamaAttention_backup(nn.Module):
     """
     LlamaAttention is a multi-headed attention module based on the 'Attention Is All You Need' paper.
 
@@ -716,13 +722,23 @@ class LlamaAttention(nn.Module):
         # Reset past_key_value to avoid return past_key_value.
         past_key_value = None
 
+        
+        
+        
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
-
+        
+        
+        
+        
+        
         attn_weights = torch.matmul(
             query_states, key_states.transpose(2, 3)
         ) / math.sqrt(self.head_dim)
+            
+        
+        
 
         if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
             raise ValueError(
@@ -759,7 +775,8 @@ class LlamaAttention(nn.Module):
                 f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
                 f" {attn_output.size()}"
             )
-
+            
+        
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
@@ -783,6 +800,191 @@ class LlamaAttention(nn.Module):
             attn_weights = None
 
         return attn_output, attn_weights, past_key_value
+
+
+
+
+def eager_attention_forward(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    scaling: float,
+    dropout: float = 0.0,
+    SpecKV_index = None,
+    **kwargs,
+):
+    key_states = repeat_kv(key, module.num_key_value_groups)
+    value_states = repeat_kv(value, module.num_key_value_groups)
+
+    attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
+    if attention_mask is not None:
+        causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+        attn_weights = attn_weights + causal_mask
+
+    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+    attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
+    
+    if SpecKV_index is not None:
+        attn_weights_extract = torch.gather(attn_weights, dim = -1, index = SpecKV_index)
+        SpecKV_index = SpecKV_index.squeeze(2).unsqueeze(-1).expand(-1, -1, -1, value_states.shape[-1])
+        value_states_extract = torch.gather(value_states, dim = 2, index = SpecKV_index)
+        attn_output = torch.matmul(attn_weights_extract, value_states_extract)
+    else:
+        attn_output = torch.matmul(attn_weights, value_states)
+    
+    attn_output = attn_output.transpose(1, 2).contiguous()
+
+    return attn_output, attn_weights
+
+class LlamaAttention(nn.Module):
+    """Multi-headed attention from 'Attention Is All You Need' paper"""
+
+    def __init__(self, config: LlamaConfig):
+        super().__init__()
+        self.config = config
+        # self.layer_idx = layer_idx
+        self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
+        self.scaling = self.head_dim**-0.5
+        self.attention_dropout = config.attention_dropout
+        self.is_causal = True
+
+        self.q_proj = nn.Linear(
+            config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias
+        )
+        self.k_proj = nn.Linear(
+            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
+        )
+        self.v_proj = nn.Linear(
+            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
+        )
+        self.o_proj = nn.Linear(
+            config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
+        )
+        
+        self._init_rope()
+        
+    def _init_rope(self):
+        if self.config.rope_scaling is None:
+            self.rotary_emb = LlamaRotaryEmbedding(
+                self.head_dim, max_position_embeddings=self.max_position_embeddings, base=self.config.rope_theta
+            )
+        else:
+            try:
+                scaling_type = self.config.rope_scaling["type"]
+                scaling_factor = self.config.rope_scaling["factor"]
+                if scaling_type == "linear":
+                    self.rotary_emb = LlamaLinearScalingRotaryEmbedding(
+                        self.head_dim,
+                        max_position_embeddings=self.max_position_embeddings,
+                        scaling_factor=scaling_factor,
+                        base=self.config.rope_theta,
+                    )
+                elif scaling_type == "dynamic":
+                    self.rotary_emb = LlamaDynamicNTKScalingRotaryEmbedding(
+                        self.head_dim,
+                        max_position_embeddings=self.max_position_embeddings,
+                        scaling_factor=scaling_factor,
+                        base=self.config.rope_theta,
+                    )
+                else:
+                    raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
+            except:
+                # print("For LLaMA 31")
+                self.rotary_emb = LlamaRotaryEmbedding_L31(config=self.config)
+    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
+        return (
+            tensor.view(bsz, seq_len, self.num_heads, self.head_dim)
+            .transpose(1, 2)
+            .contiguous()
+        )
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        # position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        SpecKV_index: Optional[torch.Tensor] = None,
+        # cache_position: Optional[torch.LongTensor] = None,
+        **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+
+        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        
+        kv_seq_len = key_states.shape[-2]
+        if past_key_value is not None:
+            kv_seq_len += past_key_value[0].shape[-2]
+        
+        if isinstance(self.rotary_emb, LlamaRotaryEmbedding_L31):
+            cos, sin = self.rotary_emb(query_states, position_ids)
+            query_states, key_states = apply_rotary_pos_emb_L31(query_states, key_states, cos, sin)
+        else:
+            cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+            query_states, key_states = apply_rotary_pos_emb(
+                query_states, key_states, cos, sin, position_ids
+            )
+
+        if past_key_value is not None:
+            # print("Key",key_states.shape)
+            # print("K Cache", past_key_value[0].shape)
+            key_states = past_key_value[0].cat(key_states, dim=2)
+            value_states = past_key_value[1].cat(value_states, dim=2)
+        # Reset past_key_value to avoid return past_key_value.
+        past_key_value = None
+        
+        attention_interface: Callable = eager_attention_forward
+        # if self.config._attn_implementation != "eager":
+        #     if self.config._attn_implementation == "sdpa" and kwargs.get("output_attentions", False):
+        #         logger.warning_once(
+        #             "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
+        #             'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+        #         )
+        #     else:
+        if query_states.shape[-2] > 1:
+            attention_interface = ALL_ATTENTION_FUNCTIONS["flash_attention_2"]
+            attention_mask = None
+            attn_output, attn_weights = attention_interface(
+                self,
+                query_states,
+                key_states,
+                value_states,
+                attention_mask,
+                dropout=0.0 if not self.training else self.attention_dropout,
+                scaling=self.scaling,
+                **kwargs,
+            )
+        else:
+            attn_output, attn_weights = attention_interface(
+                self,
+                query_states,
+                key_states,
+                value_states,
+                attention_mask,
+                dropout=0.0 if not self.training else self.attention_dropout,
+                scaling=self.scaling,
+                SpecKV_index = SpecKV_index,
+                **kwargs,
+            )
+
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        attn_output = self.o_proj(attn_output)
+        
+        if not output_attentions:
+            attn_weights = None
+        return attn_output, attn_weights,past_key_value
+
+
+
+
 
 
 class LlamaDecoderLayer(nn.Module):
@@ -820,6 +1022,7 @@ class LlamaDecoderLayer(nn.Module):
             use_cache: Optional[bool] = False,
             # [xjm:] add the SpecKV control and param
             SpecKV_index: Optional[torch.Tensor] = None,
+            **kwargs: Unpack[FlashAttentionKwargs]
     ) -> Tuple[
         torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
     ]:
@@ -859,6 +1062,7 @@ class LlamaDecoderLayer(nn.Module):
             use_cache=use_cache,
             # [xjm:] add the SpecKV param
             SpecKV_index = SpecKV_index,
+            **kwargs
         )
         hidden_states = residual + hidden_states
 
@@ -1071,6 +1275,7 @@ class LlamaModel(LlamaPreTrainedModel):
             output_hidden_states: Optional[bool] = None,
             return_dict: Optional[bool] = None,
             SpecKV_index: Optional[torch.Tensor] = None,
+            **flash_attn_kwargs: Unpack[FlashAttentionKwargs]
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = (
             output_attentions
@@ -1124,19 +1329,20 @@ class LlamaModel(LlamaPreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         # embed positions
-        if attention_mask is None:
-            attention_mask = torch.ones(
-                (batch_size, seq_length_with_past),
-                dtype=torch.bool,
-                device=inputs_embeds.device,
-            )
-        attention_mask = self._prepare_decoder_attention_mask(
-            attention_mask,
-            (batch_size, seq_length),
-            inputs_embeds,
-            past_key_values_length,
-        )
+        # if attention_mask is None:
+        #     attention_mask = torch.ones(
+        #         (batch_size, seq_length_with_past),
+        #         dtype=torch.bool,
+        #         device=inputs_embeds.device,
+        #     )
+        # attention_mask = self._prepare_decoder_attention_mask(
+        #     attention_mask,
+        #     (batch_size, seq_length),
+        #     inputs_embeds,
+        #     past_key_values_length,
+        # )
 
+        attention_mask = None
         hidden_states = inputs_embeds
 
         if self.gradient_checkpointing and self.training:
@@ -1184,6 +1390,7 @@ class LlamaModel(LlamaPreTrainedModel):
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     SpecKV_index=SpecKV_index,
+                    **flash_attn_kwargs,
                 )
 
             hidden_states = layer_outputs[0]
