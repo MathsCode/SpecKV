@@ -726,7 +726,7 @@ class Model(nn.Module):
         self.stable_kv = None
 
     @torch.no_grad()
-    def topK_genrate(self, hidden_states, input_ids, output_attentions = False, cu_seqlens_q = None):
+    def topK_genrate(self, hidden_states, input_ids, output_attentions = False, cu_seqlens_q = None, output_logits = False):
 
         input_ids = input_ids.to(hidden_states.device)
         top_k = self.top_k
@@ -762,9 +762,12 @@ class Model(nn.Module):
             draft_token = topk_index
         else:
             draft_token = topk_index+self.d2t[topk_index]
+        output = (draft_token,)
         if output_attentions:
-            return draft_token, model_outputs[1]
-        return draft_token
+            output += (model_outputs[1],)
+        if output_logits:
+            return output, topk_p
+        return output
 
 
 

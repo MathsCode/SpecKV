@@ -68,10 +68,12 @@ class Mer_Model(nn.Module):
             max_gen_toks = 2048,
             output_attentions = False, # deprecated  param
             use_SpecKV = False,
-            SpecKV_ratio = 0.2,
+            SpecKV_ratio = None,
+            SpecKV_budget = None,
             stop_criteria = [],
             multi_turn = False,
-            check_each_token = False
+            check_each_token = False,
+            output = {}
     ):
         stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
 
@@ -201,11 +203,12 @@ class Mer_Model(nn.Module):
             hiddes_states_new=torch.cat(outputs["hidden_states"],dim=-1)
             
             
+            if use_SpecKV:
             # [xjm:] ---------------Spec_model first decode---------
-            outputs = self.spec_model.topK_genrate(hiddes_states_new, input_ids, output_attentions = True)
-            spec_top_value, spec_top_index = torch.topk(outputs[1], int(outputs[1][:,:,-1:].shape[-1]*SpecKV_ratio), dim=-1)
-            spec_top_index = spec_top_index+1
-            spec_top_index = torch.cat([spec_top_index, torch.zeros_like(spec_top_index[...,:1].to(spec_top_index.device))], dim=-1)
+                outputs = self.spec_model.topK_genrate(hiddes_states_new, input_ids, output_attentions = True)
+                spec_top_value, spec_top_index = torch.topk(outputs[1], int(outputs[1][:,:,-1:].shape[-1]*SpecKV_ratio) if SpecKV_ratio else SpecKV_budget, dim=-1)
+                spec_top_index = spec_top_index+1
+                spec_top_index = torch.cat([spec_top_index, torch.zeros_like(spec_top_index[...,:1].to(spec_top_index.device))], dim=-1)
             
             
             
@@ -246,7 +249,7 @@ class Mer_Model(nn.Module):
                     # [xjm:] ---------------Start Spec_model Decode---------------
                     outputs = self.spec_model.topK_genrate(hiddes_states_new, input_ids, output_attentions = use_SpecKV)
                     # spec_attn.append(outputs[1])
-                    spec_top_value, spec_top_index = torch.topk(outputs[1], int(outputs[1].shape[-1]*SpecKV_ratio), dim=-1)
+                    spec_top_value, spec_top_index = torch.topk(outputs[1], int(outputs[1].shape[-1]*SpecKV_ratio) if SpecKV_ratio else SpecKV_budget, dim=-1)
                     spec_top_index = spec_top_index+1
                     spec_top_index = torch.cat([spec_top_index, torch.zeros_like(spec_top_index[...,:1].to(spec_top_index.device))], dim=-1)
                     # [xjm:] ---------------End Spec_model Decode---------------

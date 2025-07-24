@@ -38,6 +38,7 @@ def parse_args(args=None):
     parser.add_argument("--speckv", "-o", action="store_true", help="Enable SpecKV")
     parser.add_argument("--token_budget", "-b", type=int, default=None)
     parser.add_argument("--token_ratio", "-r",type=float, default=None)
+    parser.add_argument("--tech2", "-d", action="store_true", help="Use tech2 Mer model")
 
     return parser.parse_args(args)
 
@@ -66,9 +67,11 @@ def gen_pred(
     device,
     model_name,
     speckv,
-    speckv_ratio
+    speckv_ratio,
+    speckv_budget
 ):
     preds = []
+    outputs=[]
     for json_obj in tqdm(data):
         prompt = prompt_format.format(**json_obj)
         tokenized_prompt = tokenizer(prompt, truncation=False,  return_tensors="pt").input_ids
@@ -105,6 +108,8 @@ def gen_pred(
         
         context_length = input.input_ids.shape[-1] + q_input.input_ids.shape[-1]
         
+        out_put = {}
+        
         with torch.no_grad():
             output_ids = model(
                 input_ids = tokenized_prompt.to("cuda"),
@@ -112,7 +117,10 @@ def gen_pred(
                 max_gen_toks = max_gen,
                 use_SpecKV = speckv,
                 SpecKV_ratio = speckv_ratio,
+                SpecKV_budget = speckv_budget,
+                output = out_put
             )
+        
             
             # for input_id in q_input.input_ids[0]:
             #     output = model(
@@ -122,10 +130,6 @@ def gen_pred(
             #         SpecKV_ration = 0.2,
             #         max_gen_toks = 512
             #     )
-            
-                
-            
-            
             
         pred = tokenizer.decode(output_ids[0][len(input.input_ids[0]):], skip_special_tokens=True)
         
@@ -137,12 +141,18 @@ def gen_pred(
                 "length": json_obj["length"],
             }
         )
+        if args.tech2:
+            outputs.append(
+                {
+                    "output":out_put,
+                }
+            )
             
-    return preds
+    return preds, outputs
         
 
 
-from models.Mer_model import Mer_Model
+
 
 
 if __name__ == "__main__":
@@ -153,6 +163,11 @@ if __name__ == "__main__":
     model2spec_path = json.load(open("config/model2spec_path.json", "r"))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model_name = args.model
+    
+    if args.tech2:
+        from models.tech2_Mer_model import Mer_Model
+    else:
+        from models.Mer_model import Mer_Model
     
     model = Mer_Model.from_pretrained(
             Spec_model_path = model2spec_path[model_name],
@@ -189,7 +204,7 @@ if __name__ == "__main__":
         
         prompt_format = dataset2prompt[dataset]
         max_gen = dataset2maxlen[dataset]
-        preds = gen_pred(
+        preds, outputs = gen_pred(
             model,
             tokenizer,
             data,
@@ -200,13 +215,34 @@ if __name__ == "__main__":
             device,
             model_name,
             speckv=args.speckv,
-            speckv_ratio=args.token_ratio
+            speckv_ratio=args.token_ratio,
+            speckv_budget=args.token_budget
         )
         
-        with open(out_path, "w", encoding="utf-8") as f:
-            for pred in preds:
-                json.dump(pred, f, ensure_ascii=False)
-                f.write("\n")
+        if not args.tech2:
+            with open(out_path, "w", encoding="utf-8") as f:
+                for pred in preds:
+                    json.dump(pred, f, ensure_ascii=False)
+                    f.write("\n")
+        if args.tech2:
+            if args.token_ratio is not None:
+                with open(f"pred/{model_name}/{dataset}-tech2-ratio.jsonl", "w", encoding="utf-8") as f:
+                    for output in outputs:
+                        json.dump(output, f, indent=4, ensure_ascii=False)
+                        f.write("\n")
+                with open(f"pred/{model_name}/{dataset}-tech2-ratio-read.jsonl", "w", encoding="utf-8") as f:
+                    for output in outputs:
+                        json.dump(output, f, ensure_ascii=False)
+                        f.write("\n")
+            else:
+                with open(f"pred/{model_name}/{dataset}-tech2-budget.jsonl", "w", encoding="utf-8") as f:
+                    for output in outputs:
+                        json.dump(output, f, indent=4, ensure_ascii=False)
+                        f.write("\n")
+                with open(f"pred/{model_name}/{dataset}-tech2-budget-read.jsonl", "w", encoding="utf-8") as f:
+                    for output in outputs:
+                        json.dump(output, f, ensure_ascii=False)
+                        f.write("\n")
 
         
         
