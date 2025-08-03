@@ -841,10 +841,10 @@ def eager_attention_forward(
 class LlamaAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: LlamaConfig, layer_idx):
         super().__init__()
         self.config = config
-        # self.layer_idx = layer_idx
+        self.layer_idx = layer_idx
         self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
         self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
         self.scaling = self.head_dim**-0.5
@@ -865,9 +865,7 @@ class LlamaAttention(nn.Module):
         )
         
         
-        # [xjm@7.24]: add multi cuda stream
-        compute_stream = torch.cuda.Stream()
-        prefetch_stream = torch.cuda.Stream()
+
         
         self._init_rope()
         
@@ -916,8 +914,12 @@ class LlamaAttention(nn.Module):
         use_cache: bool = False,
         SpecKV_index: Optional[torch.Tensor] = None,
         # cache_position: Optional[torch.LongTensor] = None,
+        compute_stream: Optional[torch.cuda.Stream] = None,
+        prefetch_stream: Optional[torch.cuda.Stream] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        
+        
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
@@ -937,7 +939,9 @@ class LlamaAttention(nn.Module):
             query_states, key_states = apply_rotary_pos_emb(
                 query_states, key_states, cos, sin, position_ids
             )
-
+            
+            
+        # [xjm@7.27] prefill pass here
         if past_key_value is not None:
             # print("Key",key_states.shape)
             # print("K Cache", past_key_value[0].shape)
@@ -985,7 +989,7 @@ class LlamaAttention(nn.Module):
         
         if not output_attentions:
             attn_weights = None
-        return attn_output, attn_weights,past_key_value
+        return attn_output, attn_weights, past_key_value
 
 
 
@@ -1007,26 +1011,35 @@ class LlamaDecoderLayer(nn.Module):
         post_attention_layernorm (LlamaRMSNorm): Layer normalization after self-attention.
     """
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: LlamaConfig, layer_idx):
         super().__init__()
+        self.layer_idx = layer_idx
         self.hidden_size = config.hidden_size
-        self.self_attn = LlamaAttention(config=config)
+        self.self_attn = LlamaAttention(config=config, layer_idx= self.layer_idx)
         self.mlp = LlamaMLP(config)
         self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = LlamaRMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
-
+    
+        # [xjm@7.24]: add multi cuda stream
+        self.compute_stream = torch.cuda.Stream()
+        self.prefetch_stream = torch.cuda.Stream()
+        
     def forward(
             self,
             hidden_states: torch.Tensor,
             attention_mask: Optional[torch.Tensor] = None,
             position_ids: Optional[torch.LongTensor] = None,
-            past_key_value: Optional[Tuple[torch.Tensor]] = None,
+            # [xjm@7.24]: add the cpu and gpu cache buffer
+            past_key_values_cpu: Optional[Tuple[torch.Tensor]] = None,
+            past_key_values_gpu: Optional[Tuple[torch.Tensor]] = None,
+            prefill_kv_buffer: Optional[Tuple[torch.Tensor]] = None,
             output_attentions: Optional[bool] = False,
             use_cache: Optional[bool] = False,
             # [xjm:] add the SpecKV control and param
             SpecKV_index: Optional[torch.Tensor] = None,
+            is_decode: Optional[bool] = False,
             **kwargs: Unpack[FlashAttentionKwargs]
     ) -> Tuple[
         torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
@@ -1052,7 +1065,20 @@ class LlamaDecoderLayer(nn.Module):
                 - present_key_value (Optional[Tuple[torch.FloatTensor]]): Cached key and value projection states if
                   `use_cache` is `True`.
         """
-
+        
+        
+        # [xjm@7.24]: get layer-wise past_key_value from cpu and gpu cache buffer
+        past_key_value_cpu = (
+            past_key_values_cpu[self.layer_idx] if past_key_values_cpu is not None else None
+        )
+        past_key_value_gpu = (
+            past_key_values_gpu[self.layer_idx] if past_key_values_gpu is not None else None
+        )
+        
+        past_key_value = prefill_kv_buffer[0] if SpecKV_index is None else past_key_value_gpu
+        cur_length = past_key_value[0].current_length.item()
+        
+        
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
@@ -1062,20 +1088,59 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            past_key_value=past_key_value,
+            past_key_value = past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
             # [xjm:] add the SpecKV param
             SpecKV_index = SpecKV_index,
+            compute_stream = self.compute_stream,
+            prefetch_stream = self.prefetch_stream,
             **kwargs
         )
         hidden_states = residual + hidden_states
+        
+        
+        with torch.cuda.stream(self.prefetch_stream):
+            # [xjm@7.28]: offload the kv cache to cpu
+            if self.layer_idx + 1 < len(past_key_value_cpu):
+                if SpecKV_index is not None:
+                    # Prefetch next layer's KV cache
+                    past_key_value_cpu_next = (
+                        past_key_value_cpu[self.layer_idx + 1]
+                        if past_key_value_cpu is not None else None
+                    )
 
-        # Fully Connected
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
+                    past_key_value_gpu_next = (
+                        past_key_value_gpu[self.layer_idx + 1]
+                        if past_key_value_gpu is not None else None
+                    )
+                    
+                    
+                    selected_past_key_cpu_next = past_key_value_cpu_next[0].gather(SpecKV_index, 2)
+                    selected_past_value_cpu_next = past_key_value_cpu_next[1].gather(SpecKV_index, 2)
+
+                    past_key_value_gpu_next[0].transfer(
+                        selected_past_key_cpu_next, prev_length = 0, dim = -1)
+                    past_key_value_gpu_next[1].transfer(
+                        selected_past_value_cpu_next, prev_length = 0, dim = -1)
+                elif is_decode:
+                    
+                    
+
+            past_key_value_cpu[0].cat(past_key_value[0].data[:,:,cur_length:past_key_value[0].current_length], dim= 2)
+            past_key_value[0].current_length.zero_()
+            past_key_value_cpu[1].cat(past_key_value[1].data[:,:,cur_length:past_key_value[1].current_length], dim= 2)
+            past_key_value[1].current_length.zero_()
+                
+                
+        
+        
+            with torch.cuda.stream(self.compute_stream):
+                # Fully Connected
+                residual = hidden_states
+                hidden_states = self.post_attention_layernorm(hidden_states)
+                hidden_states = self.mlp(hidden_states)
+                hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
 
@@ -1217,7 +1282,7 @@ class LlamaModel(LlamaPreTrainedModel):
             config.vocab_size, config.hidden_size, self.padding_idx
         )
         self.layers = nn.ModuleList(
-            [LlamaDecoderLayer(config) for _ in range(config.num_hidden_layers)]
+            [LlamaDecoderLayer(config, layer_idx=idx) for idx in range(config.num_hidden_layers)]
         )
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -1273,13 +1338,17 @@ class LlamaModel(LlamaPreTrainedModel):
             input_ids: torch.LongTensor = None,
             attention_mask: Optional[torch.Tensor] = None,
             position_ids: Optional[torch.LongTensor] = None,
-            past_key_values=None,  # [MODIFIED] past_key_value is KVCache class
+            # [xjm@7.24]: add the gpu and cpu cache buffer
+            past_key_values_cpu: Optional[Tuple[torch.Tensor]] = None,
+            past_key_values_gpu: Optional[Tuple[torch.Tensor]] = None,
+            prefill_kv_buffer: Optional[Tuple[torch.Tensor]] = None,
             inputs_embeds: Optional[torch.FloatTensor] = None,
             use_cache: Optional[bool] = None,
             output_attentions: Optional[bool] = None,
             output_hidden_states: Optional[bool] = None,
             return_dict: Optional[bool] = None,
             SpecKV_index: Optional[torch.Tensor] = None,
+            is_decode: Optional[bool] = True,
             **flash_attn_kwargs: Unpack[FlashAttentionKwargs]
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = (
@@ -1314,9 +1383,10 @@ class LlamaModel(LlamaPreTrainedModel):
 
         seq_length_with_past = seq_length
         past_key_values_length = 0
-
-        if past_key_values is not None:
-            past_key_values_length = past_key_values[0][0].shape[2]
+        
+        # [xjm@7.24]: get length from past_key_values_cpu
+        if past_key_values_cpu is not None:
+            past_key_values_length = past_key_values_cpu[0][0].shape[2]
             seq_length_with_past = seq_length_with_past + past_key_values_length
 
         if position_ids is None:
@@ -1361,15 +1431,27 @@ class LlamaModel(LlamaPreTrainedModel):
         all_hidden_states = () if 1 else None
         all_self_attns = () if output_attentions else None
         next_decoder_cache = () if use_cache else None
+        
+        
+        
+        # [xjm@7.26] get the kv cache for the first layer 
+        if SpecKV_index is not None:
+            selected_past_key_cpu_next = past_key_values_cpu[0][0].gather(SpecKV_index, 2)
+            selected_past_value_cpu_next = past_key_values_cpu[0][1].gather(SpecKV_index, 2)
+            
+            past_key_values_gpu[0][0].transfer(
+                selected_past_key_cpu_next, prev_length = 0, dim = -1)
+            past_key_values_gpu[0][1].transfer(
+                selected_past_value_cpu_next, prev_length = 0, dim = -1)
+        
 
         for idx, decoder_layer in enumerate(self.layers):
             if idx==len(self.layers)-3 or idx==len(self.layers)//2 or idx==2:
                 all_hidden_states += (hidden_states,)
+                
+                
 
-            past_key_value = (
-                past_key_values[idx] if past_key_values is not None else None
-            )
-
+            
             if self.gradient_checkpointing and self.training:
 
                 def create_custom_forward(module):
@@ -1391,10 +1473,13 @@ class LlamaModel(LlamaPreTrainedModel):
                     hidden_states,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
-                    past_key_value=past_key_value,
+                    past_key_values_cpu=past_key_values_cpu,
+                    past_key_values_gpu=past_key_values_gpu,
+                    prefill_kv_buffer = prefill_kv_buffer if is_decode else None,
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     SpecKV_index=SpecKV_index,
+                    is_decode = is_decode,
                     **flash_attn_kwargs,
                 )
 

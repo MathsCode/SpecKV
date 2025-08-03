@@ -64,9 +64,40 @@ class KVCache:
         dst.copy_(tensor)
         self.current_length.add_(tensor.shape[dim])
         return torch.narrow(self.data, 2, 0, self.current_length)
+    
+    # [xjm@7.26]: gather tensor along dim
+    def gather(self, index: torch.Tensor, dim: int = 2):
+        """
+        Gather values from the current data at specified indices.
 
+        Args:
+            indices (torch.Tensor): Indices of the data tensor to be gathered.
+            dim (int, optional): Dimension along which gathering should be performed. Default is 2.
 
-def initialize_past_key_values(model,max_length=2200):
+        Returns:
+            torch.Tensor: The gathered tensor.
+        """
+        tgt = self.data.gather(dim, index)
+        
+        return tgt
+    
+    # [xjm@7.26]: transfer data after gather
+    def transfer(self, tgt: torch.Tensor, prev_length: int = 0, dim: int = -1):
+        """
+        Transfer gathered data to the current data tensor.
+
+        Args:
+            tgt (torch.Tensor): The tensor containing gathered data.
+            prev_length (int): Previous length before adding new data.
+            dim (int, optional): Dimension along which transfer should be performed. Default is -1.
+        """
+        dst = self.data.narrow(dim, prev_length, tgt.shape[dim])
+        dst.copy_(tgt, non_blocking=True)
+        self.current_length.fill_(prev_length + tgt.shape[dim])
+        
+        
+
+def initialize_past_key_values(model,max_length=2200, set_device = None, layer_num = None):
     """
     Initialize past key and value states for a given transformer model.
 
@@ -87,54 +118,80 @@ def initialize_past_key_values(model,max_length=2200):
     # Initializing the batch size to 1, this can be modified if different batch sizes are required
     batch_size = 1
     # Initializing a tensor to store past keys and values for all layers
-
+    
+    if layer_num is None:
+        layer_num = config.num_hidden_layers
+    
     devices=[]
-    for i in range(config.num_hidden_layers):
-        try:
-            device = model.model.layers[i].self_attn.q_proj.weight.device
-        except:
-            device=model.layers[i].self_attn.q_proj.weight.device
-        devices.append(device)
     past_key_values_data_list=[]
-    startnum=0
-    startdevice=devices[0]
-    for id,i in enumerate(devices):
-        if startdevice!=i:
+    if set_device is not None:
+        devices = [set_device]*layer_num
+        if set_device == 'cpu':
             past_key_values_data = torch.zeros(
-                startnum * 2,
+                layer_num * 2,
                 batch_size,
                 config.num_key_value_heads,
                 max_length,
                 config.hidden_size // config.num_attention_heads,
-                device=startdevice,
+                device=set_device,
+                dtype=model.dtype,
+            ).pin_memory()
+        else:
+            past_key_values_data = torch.zeros(
+                layer_num * 2,
+                batch_size,
+                config.num_key_value_heads,
+                max_length,
+                config.hidden_size // config.num_attention_heads,
+                device=set_device,
                 dtype=model.dtype,
             )
-            past_key_values_data_list.append(past_key_values_data)
-            startdevice = i
-            startnum=0
-        startnum += 1
-    past_key_values_data = torch.zeros(
-        startnum * 2,
-        batch_size,
-        config.num_key_value_heads,
-        max_length,
-        config.hidden_size // config.num_attention_heads,
-        device=startdevice,
-        dtype=model.dtype,
-    )
-    print("KV pre-alloc:", past_key_values_data.shape)
+    else:
+        for i in range(layer_num):
+            try:
+                device = model.model.layers[i].self_attn.q_proj.weight.device
+            except:
+                device=model.layers[i].self_attn.q_proj.weight.device
+            devices.append(device)
+        startnum=0
+        startdevice=devices[0]
+        for id,i in enumerate(devices):
+            if startdevice!=i:
+                past_key_values_data = torch.zeros(
+                    startnum * 2,
+                    batch_size,
+                    config.num_key_value_heads,
+                    max_length,
+                    config.hidden_size // config.num_attention_heads,
+                    device=startdevice,
+                    dtype=model.dtype,
+                )
+                past_key_values_data_list.append(past_key_values_data)
+                startdevice = i
+                startnum=0
+            startnum += 1
+        past_key_values_data = torch.zeros(
+            startnum * 2,
+            batch_size,
+            config.num_key_value_heads,
+            max_length,
+            config.hidden_size // config.num_attention_heads,
+            device=startdevice,
+            dtype=model.dtype,
+        )
+    # print("KV pre-alloc:", past_key_values_data.shape)
     past_key_values_data_list.append(past_key_values_data)
     # Initialize tensor to store the current length of the cached data for all layers.
     # [IMPORTANT] It needs to be kept on CPU for quick access and updates.
     current_length_data = torch.zeros(
-        config.num_hidden_layers * 2, dtype=torch.long, device="cpu"
+        layer_num * 2, dtype=torch.long, device="cpu"
     )
     # Creating a KVCache for each pair of key and value in all layers
-    past_key_values = [] * config.num_hidden_layers
+    past_key_values = [] * layer_num
 
     bias=0
     start_data_m=devices[0].index
-    for i in range(config.num_hidden_layers):
+    for i in range(layer_num):
         data_m=devices[i].index
         if data_m!=start_data_m:
             bias=0

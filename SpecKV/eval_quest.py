@@ -39,7 +39,7 @@ def parse_args(args=None):
     parser.add_argument("--token_budget", "-b", type=int, default=None)
     parser.add_argument("--token_ratio", "-r",type=float, default=None)
     parser.add_argument("--tech2", "-d", action="store_true", help="Use tech2 Mer model")
-
+    parser.add_argument("--is_async", "-a", action="store_true", help="Use async Mer model")
     return parser.parse_args(args)
 
 
@@ -164,8 +164,11 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model_name = args.model
     
+    # args.is_async = True
     if args.tech2:
         from models.tech2_Mer_model import Mer_Model
+    elif args.is_async:
+        from models.Async_Mer_model import Mer_Model
     else:
         from models.Mer_model import Mer_Model
     

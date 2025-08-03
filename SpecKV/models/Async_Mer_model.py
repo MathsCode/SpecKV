@@ -9,7 +9,8 @@ from transformers import AutoTokenizer
 import os
 from transformers import PreTrainedModel, PretrainedConfig, AutoConfig
 
-from .Ori_llama_model import LlamaForCausalLM as Ori_Model_llama
+# from .Ori_llama_model import LlamaForCausalLM as Ori_Model_llama
+from .Asych_llama_model import LlamaForCausalLM as Ori_Model_llama
 from .Ori_qwen_model import Qwen3ForCausalLM as Ori_Model_Qwen
 
 from .Spec_model import Model as Spec_Model
@@ -41,6 +42,22 @@ class Mer_Model(nn.Module):
         # [xjm:] information of spec_model
         self.spec_model = spec_model
         
+        # [xjm:] Do not consider the different devices.
+        # low_memory = False
+        # device = base_model.model.layers[-1].self_attn.q_proj.weight.device
+        # if device != base_model.lm_head.weight.device:
+        #     self.Spec_model.diff_device = True
+        #     if not low_memory:
+        #         self.Spec_model.headweight = base_model.lm_head.weight.clone().to(device)
+        #     else:
+        #         self.Spec_model.layer_device = device
+
+        # else:
+        #     self.Spec_model.diff_device = False
+        # if config.vocab_size==config.draft_vocab_size:
+        #     del self.Spec_model.d2t,self.Spec_model.t2d
+        # load_=self.Spec_model.load_state_dict(ea_layer_state_dict, strict=False)
+        # self.Spec_model.to(self.base_model.dtype).to(device)
     
     def forward(
             self,
@@ -49,6 +66,7 @@ class Mer_Model(nn.Module):
             top_p=0.0,
             top_k=0.0,
             max_length=2048,
+            gpu_length = 1024,
             max_gen_toks = 2048,
             output_attentions = False, # deprecated  param
             use_SpecKV = False,
@@ -56,7 +74,7 @@ class Mer_Model(nn.Module):
             SpecKV_budget = None,
             stop_criteria = [],
             multi_turn = False,
-            output = {},
+            output = {}
     ):
         stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
 
@@ -72,34 +90,57 @@ class Mer_Model(nn.Module):
         self.spec_model.reset_kv()
         
         # Initialize the past key and value states
+        
+        input_len = input_ids.shape[1]
+        
         if multi_turn:
-            past_key_values = self.past_key_values
-            past_key_values_data = self.past_key_values_data
-            current_length_data = self.current_length_data
+            past_key_values_cpu = self.past_key_values_cpu
+            past_key_values_gpu = self.past_key_values_gpu
+            past_key_values_data_cpu = self.past_key_values_data_cpu
+            past_key_values_data_gpu = self.past_key_values_data_gpu
+            current_length_data_gpu = self.current_length_data_gpu
+            current_length_data_cpu = self.current_length_data_cpu
         else:
             if hasattr(self, "pre_alloc"):
                 if max_length > self.pre_alloc:
-                    (past_key_values, past_key_values_data, current_length_data,) = initialize_past_key_values(self.ori_model,max_length=max_length)
-                    self.past_key_values = past_key_values
-                    self.past_key_values_data = past_key_values_data
-                    self.current_length_data = current_length_data
+                    (past_key_values_cpu, past_key_values_data_cpu, current_length_data_cpu,) = initialize_past_key_values(self.ori_model,max_length=max_length, set_device='cpu')
+                    (past_key_values_gpu, past_key_values_data_gpu, current_length_data_gpu,) = initialize_past_key_values(self.ori_model,max_length=gpu_length)
+                    self.past_key_values_cpu = past_key_values_cpu
+                    self.past_key_values_gpu = past_key_values_gpu
+                    self.past_key_values_data_cpu = past_key_values_data_cpu
+                    self.past_key_values_data_gpu = past_key_values_data_gpu
+                    self.current_length_data_gpu = current_length_data_gpu
+                    self.current_length_data_cpu = current_length_data_cpu
                     self.pre_alloc = max_length
+                    self.gpu_length = gpu_length 
                 else:
-                    past_key_values = self.past_key_values
-                    past_key_values_data = self.past_key_values_data
-                    current_length_data = self.current_length_data
-                    current_length_data.zero_()
+                    past_key_values_cpu = self.past_key_values_cpu
+                    past_key_values_gpu = self.past_key_values_gpu
+                    past_key_values_data_cpu = self.past_key_values_data_cpu
+                    past_key_values_data_gpu = self.past_key_values_data_gpu
+                    current_length_data_cpu = self.current_length_data_cpu
+                    current_length_data_gpu = self.current_length_data_gpu
+                    current_length_data_cpu.zero_()
+                    current_length_data_gpu.zero_()
             else:
-                (past_key_values, past_key_values_data, current_length_data,) = initialize_past_key_values(self.ori_model,max_length=max_length)
-                self.past_key_values = past_key_values
-                self.past_key_values_data = past_key_values_data
-                self.current_length_data = current_length_data
+                (past_key_values_cpu, past_key_values_data_cpu, current_length_data_cpu,) = initialize_past_key_values(self.ori_model,max_length=max_length, set_device='cpu')
+                (past_key_values_gpu, past_key_values_data_gpu, current_length_data_gpu,) = initialize_past_key_values(self.ori_model,max_length=gpu_length)
+                (prefill_kv_buffer, prefill_kv_buffer_data, _) = initialize_past_key_values(self.ori_model,max_length=input_len+1, set_device='cuda', layer_num = 1)
+                self.past_key_values_cpu = past_key_values_cpu
+                self.past_key_values_gpu = past_key_values_gpu
+                self.prefill_kv_buffer = prefill_kv_buffer
+                self.prefill_kv_buffer_data = prefill_kv_buffer_data
+                self.past_key_values_data_cpu = past_key_values_data_cpu
+                self.past_key_values_data_gpu = past_key_values_data_gpu
+                self.current_length_data_gpu = current_length_data_gpu
+                self.current_length_data_cpu = current_length_data_cpu
                 self.pre_alloc = max_length
-                    
+                self.gpu_length = gpu_length
+                
 
         
         input_len = input_ids.shape[1]
-        result = {}
+        
         spec_attn = None
         ori_attn = None
         # [xjm:] ---------------Start Mer_Model Prefill--------------
@@ -112,8 +153,11 @@ class Mer_Model(nn.Module):
             outputs = self.ori_model.model(
                 input_ids = input_ids,
                 attention_mask = None,
-                past_key_values = past_key_values,
+                past_key_values_cpu = past_key_values_cpu,
+                past_key_values_gpu = past_key_values_gpu,
+                prefill_kv_buffer = prefill_kv_buffer,
                 position_ids = None,
+                is_decode = False,
                 cu_seqlens_q = cu_seqlens_q
             )
             # print("end", cu_seqlens_q)
@@ -134,30 +178,37 @@ class Mer_Model(nn.Module):
             ori_device = self.ori_model.lm_head.weight.device
             if outputs["hidden_states"][0].device != ori_device:
                 outputs["hidden_states"] = [x.to(ori_device) for x in outputs["hidden_states"]]
-            hidden_states_new=torch.cat(outputs["hidden_states"],dim=-1)
+            hidden_states=torch.cat(outputs["hidden_states"],dim=-1)
             # [xjm:] ---------------End Ori_model Prefill--------------
         
             
            
             spec_top_index = None
+            if use_SpecKV:
+                
+                # [xjm:] ---------------Start Spec_model Prefill-----------
+                # [xjm:] draft tokens is useless, therefore not need logit_processor
+                outputs = self.spec_model.topK_genrate(hidden_states, input_ids,output_attentions = use_SpecKV, cu_seqlens_q = cu_seqlens_q)
+                # spec_attn = [outputs[1][:,:,-1:],]
+                # spec_top_value, spec_top_index = torch.topk(outputs[1][:,:,-1:], int(outputs[1][:,:,-1:].shape[-1]*SpecKV_ratio), dim=-1)
+                # spec_top_index = spec_top_index+1
+                # spec_top_index = torch.cat([spec_top_index, torch.zeros_like(spec_top_index[...,:1].to(spec_top_index.device))], dim=-1)
+                # [xjm:] ---------------End Spec_model Prefill-----------
             
-            # [xjm:] ---------------Start Spec_model Prefill-----------
-            # [xjm:] This is for Ori_model first decode but without attn weights
-            # [xjm:] draft tokens is useless, therefore not need logit_processor
-            outputs= self.spec_model.topK_genrate(hidden_states_new, input_ids,output_attentions = True, cu_seqlens_q = cu_seqlens_q, output_logits = False,)
-            # spec_attn = [outputs[1][:,:,-1:],]
-            # [xjm:] ---------------End Spec_model Prefill-----------
-
+            
+        # [xjm:] ---------------End Mer_model Prefill-----------
         
         
         # [xjm:] ---------------Start Mer_model Decode----------
+        # [xjm:] Recode and save the attention weights
+        
+        with torch.inference_mode():
             # [xjm:] ---------------Mer_model first decode----------
-
-            # print("---------------------1 token-----------")
-            # [xjm:] ---------------Ori_model first decode----------
             outputs = self.ori_model.model(
                     input_ids = input_ids[:,-1:],
-                    past_key_values = past_key_values,
+                    past_key_values_cpu = past_key_values_cpu,
+                    past_key_values_gpu = past_key_values_gpu,
+                    
                     # output_attentions = output_attentions,
                     SpecKV_index = None,
                 )
@@ -178,32 +229,38 @@ class Mer_Model(nn.Module):
             ori_device = self.ori_model.lm_head.weight.device
             if outputs["hidden_states"][0].device != ori_device:
                 outputs["hidden_states"] = [x.to(ori_device) for x in outputs["hidden_states"]]
-            hidden_states_new=torch.cat(outputs["hidden_states"],dim=-1)
-            # [xjm:] ---------------End Ori_model first decode----------
-                
-                
-            # [xjm:] ---------------Spec_model first decode---------
-            # [xjm:] This is for Ori_mode second decode with attn_weights
-            spec_outputs, top_prob= self.spec_model.topK_genrate(hidden_states_new, input_ids, output_attentions = True, output_logits = True,)
+            hiddes_states_new=torch.cat(outputs["hidden_states"],dim=-1)
             
+            
+            if use_SpecKV:
+            # [xjm:] ---------------Spec_model first decode---------
+                outputs = self.spec_model.topK_genrate(hiddes_states_new, input_ids, output_attentions = True)
+                spec_top_value, spec_top_index = torch.topk(outputs[1], int(outputs[1][:,:,-1:].shape[-1]*SpecKV_ratio) if SpecKV_ratio else SpecKV_budget, dim=-1)
+                spec_top_index = spec_top_index+1
+                spec_top_index = torch.cat([spec_top_index, torch.zeros_like(spec_top_index[...,:1].to(spec_top_index.device))], dim=-1)
+            
+            
+            
+            
+            for idx in range(max_gen_toks - 1):
                 
-        
-        with torch.inference_mode():
-            # [xjm:] ---------------Start Ori_model Second++ Decode---------------
-            for idx in range(1,max_gen_toks - 1):
-                result = {}
-                # [xjm:] Try baseline and different KV Cache ratio
-                
-                # Baseline decode
+                # [xjm:] ---------------Start Ori_model Decode---------------
                 outputs = self.ori_model.model(
                     input_ids = input_ids[:,-1:],
-                    past_key_values = past_key_values,
+                    past_key_values_cpu = past_key_values_cpu,
+                    past_key_values_gpu = past_key_values_gpu,
                     # output_attentions = output_attentions,
-                    SpecKV_index = None,
+                    SpecKV_index = spec_top_index if use_SpecKV else None,
                 )
-                current_length_data.sub_(1)
                 last_hidden_states = outputs[0]
-                hidden_states_new = torch.cat(outputs["hidden_states"],dim=-1)
+                # if output_attentions:
+                #     attn_data = torch.cat(outputs[3],dim=0)
+                #     if ori_attn == None:
+                #         ori_attn = [attn_data,]
+                #     else:
+                #         ori_attn.append(attn_data)
+
+                hiddes_states_new = torch.cat(outputs["hidden_states"],dim=-1)
                 orig = self.ori_model.lm_head(last_hidden_states)
                 if logits_processor is not None:
                     logits = orig[:, -1]
@@ -213,66 +270,23 @@ class Mer_Model(nn.Module):
                 else:
                     token = torch.argmax(orig[:, -1])
                     token = token[None, None]
-                # input_ids = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
-                # print("baseline:{}".format(token))
-                result['baseline'] = token.item()
+                input_ids = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
                 # [xjm:] ---------------End Ori_model Decode---------------
                 
                 
                 
-                # Different KV Cache ratio
-                if SpecKV_ratio is not None:
-                    iter_list = [0.1, 0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9]
-                elif SpecKV_budget is not None:
-                    iter_list = [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
-                for ratio in iter_list:
-                    if ratio > spec_outputs[1][:,:,-1:].shape[-1]:
-                        break
-                    spec_top_value, spec_top_index = torch.topk(spec_outputs[1], int(spec_outputs[1][:,:,-1:].shape[-1]*ratio) if SpecKV_ratio is not None else ratio, dim=-1)
+                if use_SpecKV:
+                    # [xjm:] ---------------Start Spec_model Decode---------------
+                    outputs = self.spec_model.topK_genrate(hiddes_states_new, input_ids, output_attentions = use_SpecKV)
+                    # spec_attn.append(outputs[1])
+                    spec_top_value, spec_top_index = torch.topk(outputs[1], int(outputs[1].shape[-1]*SpecKV_ratio) if SpecKV_ratio else SpecKV_budget, dim=-1)
                     spec_top_index = spec_top_index+1
                     spec_top_index = torch.cat([spec_top_index, torch.zeros_like(spec_top_index[...,:1].to(spec_top_index.device))], dim=-1)
                     
-                    outputs_tmp = self.ori_model.model(
-                        input_ids = input_ids[:,-1:],
-                        past_key_values = past_key_values,
-                        # output_attentions = output_attentions,
-                        SpecKV_index = spec_top_index,
-                    )
+                    # change the SpecKV_index shape for KV Selection
+                    SpecKV_index = SpecKV_index.squeeze(2).unsqueeze(-1).expand(-1, -1, -1, past_key_values_gpu[0].shape[-1])
                     
-                    last_hidden_states = outputs_tmp[0]
-                    # if output_attentions:
-                    #     attn_data = torch.cat(outputs[3],dim=0)
-                    #     if ori_attn == None:
-                    #         ori_attn = [attn_data,]
-                    #     else:
-                    #         ori_attn.append(attn_data)
-
-                    orig = self.ori_model.lm_head(last_hidden_states)
-                    if logits_processor is not None:
-                        logits = orig[:, -1]
-                        logits = logits_processor(None, logits)
-                        probabilities = torch.nn.functional.softmax(logits, dim=1)
-                        token = torch.multinomial(probabilities, 1)
-                    else:
-                        token = torch.argmax(orig[:, -1])
-                        token = token[None, None]
-                    
-                        
-                    result[ratio] = token.item()
-                    current_length_data.sub_(1)
-                    if token.item() == result['baseline']:
-                        break
-                input_ids = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
-                current_length_data.add_(1)
-                result['prob'] = top_prob.tolist()
-                
-                # [xjm:] ---------------Start Spec_model Decode---------------
-                spec_outputs, top_prob = self.spec_model.topK_genrate(hidden_states_new, input_ids, output_attentions = True, output_logits = True,)
-                # spec_attn.append(outputs[1])
-                # [xjm:] ---------------End Spec_model Decode---------------
-                output[str(idx)] = result
-            
-            
+                    # [xjm:] ---------------End Spec_model Decode---------------
                 
                 if stop_token_id in input_ids[0, input_len:].tolist():
                     break
@@ -282,7 +296,7 @@ class Mer_Model(nn.Module):
                     break
                 
                 is_stoped = False
-                # # [xjm:] check stop criteria
+                # [xjm:] check stop criteria
                 for stop_criteria_rule in stop_criteria:
                     if input_ids[0, -len(stop_criteria_rule):].tolist() == stop_criteria_rule:
                         is_stoped = True
@@ -290,6 +304,13 @@ class Mer_Model(nn.Module):
                 if is_stoped:
                     break
                 
+            # if output_attentions:
+            #     import pickle
+            #     # [xjm:] Save the attention weights
+            #     with open("/home/xujiaming/xujiaming/Paper/SpecKV/SpecKV/attn_data/ori_attn.pkl", "wb") as f:
+            #         pickle.dump(ori_attn, f)
+            #     with open("/home/xujiaming/xujiaming/Paper/SpecKV/SpecKV/attn_data/spec_attn.pkl", "wb") as f:
+            #         pickle.dump(spec_attn, f)
             return input_ids
 
     @classmethod
