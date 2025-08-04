@@ -73,6 +73,7 @@ class Mer_Model(nn.Module):
             stop_criteria = [],
             multi_turn = False,
             is_async = False,
+            reserved_pos = None,
             output = {}
     ):
         stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
@@ -161,7 +162,12 @@ class Mer_Model(nn.Module):
                 # [xjm:] ---------------Start Spec_model Prefill-----------
                 # [xjm:] draft tokens is useless, therefore not need logit_processor
                 outputs = self.spec_model.topK_genrate(hidden_states, input_ids,output_attentions = use_SpecKV)
-                spec_top_value, spec_top_index = torch.topk(outputs[1][:,:,-1:], int(outputs[1][:,:,-1:].shape[-1]*SpecKV_ratio if SpecKV_ratio else SpecKV_budget), dim=-1)
+                if reserved_pos is not None:
+                    spec_top_value, spec_top_index = torch.topk(outputs[1][:,:,-1:,:reserved_pos], int(outputs[1][:,:,-1:,:reserved_pos].shape[-1]*SpecKV_ratio if SpecKV_ratio else SpecKV_budget), dim=-1)
+                    reserved_pos_tensor = torch.arange(reserved_pos,device=spec_top_index.device).expand(1,spec_top_index.shape[1],1,-1)
+                    spec_top_index = torch.cat([spec_top_index, reserved_pos_tensor], dim=-1)
+                else:
+                    spec_top_value, spec_top_index = torch.topk(outputs[1][:,:,-1:], int(outputs[1][:,:,-1:].shape[-1]*SpecKV_ratio if SpecKV_ratio else SpecKV_budget), dim=-1)
                 spec_top_index = spec_top_index+1
                 spec_top_index = torch.cat([spec_top_index, torch.zeros_like(spec_top_index[...,:1].to(spec_top_index.device))], dim=-1)
                 # [xjm:] ---------------End Spec_model Prefill-----------
@@ -170,47 +176,9 @@ class Mer_Model(nn.Module):
         # [xjm:] ---------------End Mer_model Prefill-----------
         
         
-        # [xjm:] ---------------Start Mer_model Decode----------
-        # [xjm:] Recode and save the attention weights
-        
-        # with torch.inference_mode():
-        #     # [xjm@8.1]: We modified the draft model
-        #     # [xjm:] ---------------Mer_model first decode----------
-        #     outputs = self.ori_model.model(
-        #             input_ids = input_ids[:,-1:],
-        #             past_key_values = past_key_values,
-        #             output_attentions = output_attentions,
-        #             SpecKV_index = None,
-        #         )
-        #     hidden_states = outputs[0]
-        #     orig = self.ori_model.lm_head(hidden_states)
+
             
-        #     if logits_processor is not None:
-        #         logits = orig[:, -1]
-        #         logits = logits_processor(None, logits)
-        #         probabilities = torch.nn.functional.softmax(logits, dim=1)
-        #         token = torch.multinomial(probabilities, 1)
-        #     else:
-        #         token = torch.argmax(orig[:, -1])
-        #         token = token[None, None]
-            
-        #     input_ids = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
-        #     # Clone the output hidden states
-        #     ori_device = self.ori_model.lm_head.weight.device
-        #     if outputs["hidden_states"][0].device != ori_device:
-        #         outputs["hidden_states"] = [x.to(ori_device) for x in outputs["hidden_states"]]
-        #     hiddes_states_new=torch.cat(outputs["hidden_states"],dim=-1)
-            
-            
-            # if use_SpecKV:
-            # [xjm:] ---------------Spec_model first decode---------
-                # outputs = self.spec_model.topK_genrate(hiddes_states_new, input_ids, output_attentions = True)
-                # spec_top_value, spec_top_index = torch.topk(outputs[1], int(outputs[1][:,:,-1:].shape[-1]*SpecKV_ratio) if SpecKV_ratio else SpecKV_budget, dim=-1)
-                # spec_top_index = spec_top_index+1
-                # spec_top_index = torch.cat([spec_top_index, torch.zeros_like(spec_top_index[...,:1].to(spec_top_index.device))], dim=-1)
-            
-            
-            
+             
             
             for idx in range(max_gen_toks - 1):
                 

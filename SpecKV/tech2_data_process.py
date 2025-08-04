@@ -8,7 +8,7 @@ with open("/home/xujiaming/xujiaming/Paper/SpecKV/SpecKV/pred/Meta-Llama-3.1-8B-
 import math
 
 
-prob_set = {str(i):[] for i in [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1]}
+prob_set = {str(i):[] for i in [32,64,128,256,512,1024,2048,4096,8192]}
 
 
 for data in data_set:

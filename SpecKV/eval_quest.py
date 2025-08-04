@@ -40,6 +40,8 @@ def parse_args(args=None):
     parser.add_argument("--token_ratio", "-r",type=float, default=None)
     parser.add_argument("--tech2", "-d", action="store_true", help="Use tech2 Mer model")
     parser.add_argument("--is_async", "-a", action="store_true", help="Use async Mer model")
+    parser.add_argument(
+        "--limit", "-l", type=int, default=None)
     return parser.parse_args(args)
 
 
@@ -66,13 +68,17 @@ def gen_pred(
     dataset,
     device,
     model_name,
+    limit,
     speckv,
     speckv_ratio,
     speckv_budget
 ):
     preds = []
     outputs=[]
-    for json_obj in tqdm(data):
+    
+    
+    
+    for idx, json_obj in tqdm(enumerate(data)):
         prompt = prompt_format.format(**json_obj)
         tokenized_prompt = tokenizer(prompt, truncation=False,  return_tensors="pt").input_ids
         
@@ -96,7 +102,7 @@ def gen_pred(
         
         
         # max simulation length is 100
-        q_pos = max(len(prompt) - 100, q_pos)
+        # q_pos = max(len(prompt) - 100, q_pos)
         
         if q_pos != None:
             question = prompt[q_pos:]
@@ -105,6 +111,7 @@ def gen_pred(
         input = tokenizer(prompt, truncation=False, return_tensors="pt").to("cuda")
         q_input = tokenizer(question, truncation=False, return_tensors="pt").to("cuda")
         q_input.input_ids = q_input.input_ids[:, 1:]
+        context = torch.cat([input.input_ids, q_input.input_ids], dim=-1)
         
         context_length = input.input_ids.shape[-1] + q_input.input_ids.shape[-1]
         
@@ -112,24 +119,17 @@ def gen_pred(
         
         with torch.no_grad():
             output_ids = model(
-                input_ids = tokenized_prompt.to("cuda"),
-                max_length = len(tokenized_prompt[0])+max_gen+1024,
+                input_ids = context,
+                max_length = context_length+max_gen+1024,
                 max_gen_toks = max_gen,
                 use_SpecKV = speckv,
                 SpecKV_ratio = speckv_ratio,
                 SpecKV_budget = speckv_budget,
+                reserved_pos = input.input_ids.shape[-1],
                 output = out_put
             )
         
-            
-            # for input_id in q_input.input_ids[0]:
-            #     output = model(
-            #         input_ids = input_id.unsqueeze(0).unsqueeze(0),
-            #         multi_turn = True,
-            #         use_SpecKV = True,
-            #         SpecKV_ration = 0.2,
-            #         max_gen_toks = 512
-            #     )
+
             
         pred = tokenizer.decode(output_ids[0][len(input.input_ids[0]):], skip_special_tokens=True)
         
@@ -147,6 +147,8 @@ def gen_pred(
                     "output":out_put,
                 }
             )
+        if limit is not None and idx >= limit:
+            break
             
     return preds, outputs
         
@@ -219,7 +221,8 @@ if __name__ == "__main__":
             model_name,
             speckv=args.speckv,
             speckv_ratio=args.token_ratio,
-            speckv_budget=args.token_budget
+            speckv_budget=args.token_budget,
+            limit = args.limit
         )
         
         if not args.tech2:
