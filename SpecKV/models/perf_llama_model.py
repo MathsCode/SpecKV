@@ -822,15 +822,23 @@ def eager_attention_forward(
         key_states_extract = torch.gather(key_states, dim = 2, index = SpecKV_index)
         value_states_extract = torch.gather(value_states, dim = 2, index = SpecKV_index)
         attn_weights = torch.matmul(query, key_states_extract.transpose(2, 3)) * scaling
+        if attention_mask is not None:
+            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+            attn_weights = attn_weights + causal_mask
+
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+        attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
+        attn_output = torch.matmul(attn_weights, value_states_extract)
     else:
         attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
         
-    if attention_mask is not None:
-        causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-        attn_weights = attn_weights + causal_mask
+        if attention_mask is not None:
+            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+            attn_weights = attn_weights + causal_mask
 
-    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
-    attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+        attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
+        attn_output = torch.matmul(attn_weights, value_states)
     
     attn_output = attn_output.transpose(1, 2).contiguous()
 

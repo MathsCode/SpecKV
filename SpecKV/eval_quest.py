@@ -40,6 +40,7 @@ def parse_args(args=None):
     parser.add_argument("--token_ratio", "-r",type=float, default=None)
     parser.add_argument("--tech2", "-d", action="store_true", help="Use tech2 Mer model")
     parser.add_argument("--is_async", "-a", action="store_true", help="Use async Mer model")
+    parser.add_argument("--eval_perf", "-ep", action="store_true", help="Evaluate performance of the model")
     parser.add_argument(
         "--limit", "-l", type=int, default=None)
     return parser.parse_args(args)
@@ -171,6 +172,8 @@ if __name__ == "__main__":
         from models.tech2_Mer_model import Mer_Model
     elif args.is_async:
         from models.Async_Mer_model import Mer_Model
+    elif args.eval_perf:
+        from models.perf_Mer_model import Mer_Model
     else:
         from models.Mer_model import Mer_Model
     

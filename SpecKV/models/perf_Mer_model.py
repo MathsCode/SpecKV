@@ -40,6 +40,8 @@ class Mer_Model(nn.Module):
         
         # [xjm:] information of spec_model
         self.spec_model = spec_model
+        self.hidden_dim = self.config.hidden_size // self.config.num_attention_heads
+        
         
         # [xjm:] Do not consider the different devices.
         # low_memory = False
@@ -120,6 +122,8 @@ class Mer_Model(nn.Module):
         
         spec_attn = None
         ori_attn = None
+        
+        
         # [xjm:] ---------------Start Mer_Model Prefill--------------
         with torch.inference_mode():
             # [xjm:] ---------------Start Ori_model Prefill--------------
@@ -154,23 +158,32 @@ class Mer_Model(nn.Module):
                 outputs["hidden_states"] = [x.to(ori_device) for x in outputs["hidden_states"]]
             hidden_states_new=torch.cat(outputs["hidden_states"],dim=-1)
             # [xjm:] ---------------End Ori_model Prefill--------------
-        
+
             
+            # print("Prefill Ori_model time:", time.time() - st)
+            # record = time.time()
            
             spec_top_index = None
             if use_SpecKV:
+                
                 # [xjm:] ---------------Start Spec_model Prefill-----------
                 # [xjm:] draft tokens is useless, therefore not need logit_processor
                 outputs = self.spec_model.topK_genrate(hidden_states_new, input_ids,output_attentions = use_SpecKV)
                 if reserved_pos is not None:
                     spec_top_value, spec_top_index = torch.topk(outputs[1][:,:,-1:,:reserved_pos], int(outputs[1][:,:,-1:,:reserved_pos].shape[-1]*SpecKV_ratio if SpecKV_ratio else SpecKV_budget), dim=-1)
-                    reserved_pos_tensor = torch.arange(reserved_pos,device=spec_top_index.device).expand(1,spec_top_index.shape[1],1,-1)
+                    reserved_pos_tensor = torch.arange(reserved_pos, outputs[1].shape[-1],device=spec_top_index.device).expand(1,spec_top_index.shape[1],1,-1)
                     spec_top_index = torch.cat([spec_top_index, reserved_pos_tensor], dim=-1)
                 else:
                     spec_top_value, spec_top_index = torch.topk(outputs[1][:,:,-1:], int(outputs[1][:,:,-1:].shape[-1]*SpecKV_ratio if SpecKV_ratio else SpecKV_budget), dim=-1)
                 spec_top_index = spec_top_index+1
                 spec_top_index = torch.cat([spec_top_index, torch.zeros_like(spec_top_index[...,:1].to(spec_top_index.device))], dim=-1)
+                spec_top_index = spec_top_index.squeeze(2).unsqueeze(-1).expand(-1, -1, -1, self.hidden_dim)
                 # [xjm:] ---------------End Spec_model Prefill-----------
+
+                
+                # print("Prefill Spec_model time:", time.time() - record)
+                # record = time.time()
+            
             
             
         # [xjm:] ---------------End Mer_model Prefill-----------
@@ -179,8 +192,9 @@ class Mer_Model(nn.Module):
 
             
              
-            
+            st = time.time()
             for idx in range(max_gen_toks - 1):
+                
                 
                 # [xjm:] ---------------Start Ori_model Decode---------------
                 outputs = self.ori_model.model(
@@ -190,8 +204,6 @@ class Mer_Model(nn.Module):
                     SpecKV_index = spec_top_index if use_SpecKV else None,
                 )
                 last_hidden_states = outputs[0]
-
-
                 hiddes_states_new = torch.cat(outputs["hidden_states"],dim=-1)
                 orig = self.ori_model.lm_head(last_hidden_states)
                 if logits_processor is not None:
@@ -203,6 +215,9 @@ class Mer_Model(nn.Module):
                     token = torch.argmax(orig[:, -1])
                     token = token[None, None]
                 input_ids = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
+                
+                # print("Ori_model decode time:", time.time() - record)
+                # record = time.time()
                 # [xjm:] ---------------End Ori_model Decode---------------
                 
                 
@@ -210,14 +225,20 @@ class Mer_Model(nn.Module):
                     # [xjm:] ---------------Start Spec_model Decode---------------
                     outputs = self.spec_model.topK_genrate(hiddes_states_new, input_ids, output_attentions = use_SpecKV)
                     if reserved_pos is not None:
-                        spec_top_value, spec_top_index = torch.topk(outputs[1][:,:,-1,:reserved_pos], int(outputs[1][:,:,-1:,:reserved_pos].shape[-1]*SpecKV_ratio) if SpecKV_ratio else SpecKV_budget, dim=-1)
-                        reserved_pos_tensor = torch.arange(reserved_pos,device=spec_top_index.device).expand(1,spec_top_index.shape[1],1,-1)
+                        spec_top_value, spec_top_index = torch.topk(outputs[1][:,:,-1:,:reserved_pos], int(outputs[1][:,:,-1:,:reserved_pos].shape[-1]*SpecKV_ratio) if SpecKV_ratio else SpecKV_budget, dim=-1)
+                        reserved_pos_tensor = torch.arange(reserved_pos,outputs[1].shape[-1],device=spec_top_index.device).expand(1,spec_top_index.shape[1],1,-1)
                         spec_top_index = torch.cat([spec_top_index, reserved_pos_tensor], dim=-1)
                     else:
                         spec_top_value, spec_top_index = torch.topk(outputs[1], int(outputs[1].shape[-1]*SpecKV_ratio) if SpecKV_ratio else SpecKV_budget, dim=-1)
                     spec_top_index = spec_top_index+1
                     spec_top_index = torch.cat([spec_top_index, torch.zeros_like(spec_top_index[...,:1].to(spec_top_index.device))], dim=-1)
+                    spec_top_index = spec_top_index.squeeze(2).unsqueeze(-1).expand(-1, -1, -1, self.hidden_dim)
+                    
+                    # print("Spec_model decode time:",  time.time() - record)
+                    # record = time.time()
                     # [xjm:] ---------------End Spec_model Decode---------------
+                    
+                    
                 
                 if stop_token_id in input_ids[0, input_len:].tolist():
                     break
@@ -234,6 +255,12 @@ class Mer_Model(nn.Module):
                         break
                 if is_stoped:
                     break
+            
+            ed = time.time()
+            
+            num_tokens = input_ids.shape[1] - input_len
+            # print(num_tokens)
+            print(num_tokens/(ed - st), "tokens/s")
                 
             return input_ids
 

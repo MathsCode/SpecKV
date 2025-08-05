@@ -10,7 +10,11 @@
             "type": "debugpy",
             "request": "launch",
             "program": "${file}",
-            "console": "integratedTerminal"
+            "console": "integratedTerminal",
+            "args": ["-t", "gov_report",
+                    "-b", "32",
+                    "-o", "-l", "10",
+                    "-ep"]
         }
     ]
 }
